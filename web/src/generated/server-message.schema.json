@@ -1,0 +1,905 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ServerMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "iceConfiguration": {
+          "$ref": "#/$defs/IceConfiguration"
+        },
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "resumeExpiresAt": {
+          "type": "string"
+        },
+        "resumeToken": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/PeerRole"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/RoomSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth:succeeded"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "roomId",
+        "peerId",
+        "role",
+        "resumeToken",
+        "resumeExpiresAt",
+        "snapshot",
+        "iceConfiguration"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth:failed"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "code",
+        "message"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/RoomSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:snapshot"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:closed"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:expired"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "maximumViewers": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:capacity-updated"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "maximumViewers"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:display-name-updated"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "presenter:disconnected"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "presenter:resumed"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:pending"
+        },
+        "viewer": {
+          "$ref": "#/$defs/PeerSnapshot"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "viewer"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:approved"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:rejected"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:kicked"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:left"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:resumed"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "iceRestart": {
+          "type": "boolean"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sdp": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "sourcePeerId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:offer"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "sourcePeerId",
+        "sdp",
+        "iceRestart"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sdp": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "sourcePeerId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:answer"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "sourcePeerId",
+        "sdp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sdpMLineIndex": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sdpMid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "sourcePeerId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:ice-candidate"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "sourcePeerId",
+        "candidate"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "sourcePeerId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:ice-restart"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "sourcePeerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/IceConfiguration"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "ice:configuration"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "configuration"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "heartbeat:ping"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "nonce"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "serverTimestamp",
+        "code",
+        "message"
+      ]
+    }
+  ],
+  "$defs": {
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "unsupported_protocol_version",
+        "invalid_message",
+        "authentication_required",
+        "authentication_failed",
+        "authorization_denied",
+        "room_not_found",
+        "room_full",
+        "room_expired",
+        "room_closed",
+        "viewer_not_found",
+        "viewer_not_approved",
+        "pending_viewer_limit_reached",
+        "invalid_destination",
+        "invalid_capacity",
+        "message_too_large",
+        "rate_limited",
+        "session_expired",
+        "origin_rejected",
+        "internal"
+      ]
+    },
+    "IceConfiguration": {
+      "type": "object",
+      "properties": {
+        "expiresAt": {
+          "type": "string"
+        },
+        "iceServers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IceServer"
+          }
+        }
+      },
+      "required": [
+        "expiresAt",
+        "iceServers"
+      ]
+    },
+    "IceServer": {
+      "type": "object",
+      "properties": {
+        "credential": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "urls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "urls"
+      ]
+    },
+    "PeerRole": {
+      "type": "string",
+      "enum": [
+        "presenter",
+        "viewer"
+      ]
+    },
+    "PeerSnapshot": {
+      "type": "object",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joinedAt": {
+          "type": "string"
+        },
+        "peerId": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/PeerRole"
+        },
+        "viewerState": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ViewerState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "peerId",
+        "role",
+        "connected",
+        "joinedAt"
+      ]
+    },
+    "RoomAccessPolicy": {
+      "type": "string",
+      "enum": [
+        "public",
+        "approvalRequired"
+      ]
+    },
+    "RoomLifecycle": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed",
+        "expired"
+      ]
+    },
+    "RoomSnapshot": {
+      "type": "object",
+      "properties": {
+        "accessPolicy": {
+          "$ref": "#/$defs/RoomAccessPolicy"
+        },
+        "approvedViewers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PeerSnapshot"
+          }
+        },
+        "expiresAt": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/RoomLifecycle"
+        },
+        "maximumViewers": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "pendingViewers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PeerSnapshot"
+          }
+        },
+        "presenterConnected": {
+          "type": "boolean"
+        },
+        "roomId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "roomId",
+        "lifecycle",
+        "accessPolicy",
+        "maximumViewers",
+        "expiresAt",
+        "presenterConnected",
+        "pendingViewers",
+        "approvedViewers"
+      ]
+    },
+    "ViewerState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "approved",
+        "disconnected",
+        "rejected",
+        "kicked"
+      ]
+    }
+  }
+}

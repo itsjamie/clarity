@@ -1,0 +1,14 @@
+[package]
+name = "clarity-xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+clarity-protocol = { path = "../clarity-protocol" }
+schemars.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true

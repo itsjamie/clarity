@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="towerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#9b7bf0"></stop>
+      <stop offset="48%" stop-color="#7c3aed"></stop>
+      <stop offset="100%" stop-color="#5b21b6"></stop>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#7c3aed" stop-opacity="0.22"></stop>
+      <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"></stop>
+    </radialGradient>
+  </defs>
+
+  <ellipse cx="64" cy="120" rx="36" ry="4" fill="#5b21b6" opacity="0.16"></ellipse>
+
+  <polygon points="46,110 82,110 92,117 36,117" fill="url(#towerGrad)"></polygon>
+
+  <path d="M55,58 C52,75 45,95 41,110 L87,110 C83,95 76,75 73,58 Z" fill="url(#towerGrad)"></path>
+  <line x1="60" y1="70" x2="57" y2="105" stroke="#ffffff" stroke-width="1" opacity="0.16"></line>
+
+  <polygon points="47,58 53,58 50,63" fill="#5b21b6" opacity="0.85"></polygon>
+  <polygon points="81,58 75,58 78,63" fill="#5b21b6" opacity="0.85"></polygon>
+  <rect x="45" y="52" width="38" height="6" rx="3" fill="url(#towerGrad)"></rect>
+
+  <circle cx="64" cy="43" r="18" fill="url(#glow)"></circle>
+
+  <rect x="49" y="32" width="30" height="3.5" rx="1.5" fill="url(#towerGrad)"></rect>
+
+  <rect x="53" y="35" width="22" height="17" fill="#7c3aed" opacity="0.16"></rect>
+  <rect x="53" y="35" width="22" height="17" fill="none" stroke="#5b21b6" stroke-width="1.6"></rect>
+  <line x1="59" y1="35" x2="59" y2="52" stroke="#5b21b6" stroke-width="1.1" opacity="0.6"></line>
+  <line x1="64" y1="35" x2="64" y2="52" stroke="#5b21b6" stroke-width="1.1" opacity="0.6"></line>
+  <line x1="69" y1="35" x2="69" y2="52" stroke="#5b21b6" stroke-width="1.1" opacity="0.6"></line>
+  <line x1="53" y1="43.5" x2="75" y2="43.5" stroke="#5b21b6" stroke-width="1" opacity="0.55"></line>
+
+  <path d="M53,32 C53,20.5 58,16.5 64,16.5 C70,16.5 75,20.5 75,32 Z" fill="url(#towerGrad)"></path>
+  <path d="M56,29 C56.5,21.5 60,18.5 64,18.5" stroke="#e9e2ff" stroke-width="1.3" opacity="0.35" fill="none"></path>
+
+  <line x1="64" y1="8" x2="64" y2="16.5" stroke="#5b21b6" stroke-width="1.6"></line>
+  <circle cx="64" cy="7" r="2.4" fill="#5b21b6"></circle>
+</svg>

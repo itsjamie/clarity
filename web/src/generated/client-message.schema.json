@@ -1,0 +1,476 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientMessage",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "presenterSecret": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth:presenter"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "roomId",
+        "presenterSecret"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth:viewer"
+        },
+        "viewerSecret": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "roomId",
+        "viewerSecret"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "resumeToken": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "session:resume"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "roomId",
+        "resumeToken"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:close"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "maximumViewers": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:update-capacity"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "maximumViewers"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:update-display-name"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:approve"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:reject"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "peerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "viewer:kick"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "peerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "peer:leave"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "destinationPeerId": {
+          "type": "string"
+        },
+        "iceRestart": {
+          "type": "boolean"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sdp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:offer"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "destinationPeerId",
+        "sdp",
+        "iceRestart"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "destinationPeerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sdp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:answer"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "destinationPeerId",
+        "sdp"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "type": "string"
+        },
+        "destinationPeerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sdpMLineIndex": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sdpMid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:ice-candidate"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "destinationPeerId",
+        "candidate"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "destinationPeerId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "signal:ice-restart"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "destinationPeerId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "ice:refresh"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "heartbeat:pong"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "nonce"
+      ]
+    }
+  ]
+}

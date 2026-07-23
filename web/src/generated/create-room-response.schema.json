@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CreateRoomResponse",
+  "type": "object",
+  "properties": {
+    "accessPolicy": {
+      "$ref": "#/$defs/RoomAccessPolicy"
+    },
+    "expiresAt": {
+      "type": "string"
+    },
+    "maximumViewers": {
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0
+    },
+    "presenterPath": {
+      "type": "string"
+    },
+    "presenterSecret": {
+      "type": "string"
+    },
+    "protocolVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "roomId": {
+      "type": "string"
+    },
+    "viewerUrl": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "roomId",
+    "presenterSecret",
+    "presenterPath",
+    "viewerUrl",
+    "expiresAt",
+    "maximumViewers",
+    "accessPolicy"
+  ],
+  "$defs": {
+    "RoomAccessPolicy": {
+      "type": "string",
+      "enum": [
+        "public",
+        "approvalRequired"
+      ]
+    }
+  }
+}

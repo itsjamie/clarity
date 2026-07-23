@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CreateRoomRequest",
+  "type": "object",
+  "properties": {
+    "accessPolicy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RoomAccessPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expiresInSeconds": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "maximumViewers": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "RoomAccessPolicy": {
+      "type": "string",
+      "enum": [
+        "public",
+        "approvalRequired"
+      ]
+    }
+  }
+}
