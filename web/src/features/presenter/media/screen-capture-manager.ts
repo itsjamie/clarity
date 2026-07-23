@@ -8,7 +8,7 @@ export interface CaptureSettings {
   frameRate?: number;
   displaySurface?: string;
   contentHint: string;
-  hasSystemAudio: boolean;
+  hasAudio: boolean;
 }
 
 export interface CaptureResult {
@@ -20,7 +20,7 @@ export interface CaptureResult {
 interface ExtendedDisplayMediaOptions {
   video: MediaTrackConstraints;
   audio: boolean;
-  systemAudio?: 'include' | 'exclude';
+  windowAudio?: 'system' | 'window' | 'exclude';
   selfBrowserSurface?: 'include' | 'exclude';
   surfaceSwitching?: 'include' | 'exclude';
 }
@@ -38,20 +38,20 @@ export class ScreenCaptureManager {
     return this.#stream;
   }
 
-  public async start(mode: CaptureMode, includeSystemAudio: boolean): Promise<CaptureResult> {
+  public async start(mode: CaptureMode, includeAudio: boolean): Promise<CaptureResult> {
     if (this.#stream) throw new Error('A capture source is already active.');
-    const result = await this.#acquire(mode, includeSystemAudio);
+    const result = await this.#acquire(mode, includeAudio);
     this.#adopt(result.stream);
     return result;
   }
 
   public async changeSource(
     mode: CaptureMode,
-    includeSystemAudio: boolean,
+    includeAudio: boolean,
     replaceTracks: (stream: MediaStream) => Promise<string[]>,
   ): Promise<CaptureResult> {
     const previous = this.#stream;
-    const result = await this.#acquire(mode, includeSystemAudio);
+    const result = await this.#acquire(mode, includeAudio);
     const failures = await replaceTracks(result.stream);
     if (failures.length > 0) {
       result.stream.getTracks().forEach((track) => track.stop());
@@ -71,7 +71,7 @@ export class ScreenCaptureManager {
     this.#intentionalStop = false;
   }
 
-  async #acquire(mode: CaptureMode, includeSystemAudio: boolean): Promise<CaptureResult> {
+  async #acquire(mode: CaptureMode, includeAudio: boolean): Promise<CaptureResult> {
     let stream: MediaStream;
     if (
       isSyntheticCaptureEnabled() &&
@@ -94,8 +94,8 @@ export class ScreenCaptureManager {
           height: { ideal: 1440 },
           frameRate: { ideal: frameRate },
         },
-        audio: includeSystemAudio,
-        systemAudio: includeSystemAudio ? 'include' : 'exclude',
+        audio: includeAudio,
+        windowAudio: includeAudio ? 'window' : 'exclude',
         selfBrowserSurface: 'exclude',
         surfaceSwitching: 'include',
       };
@@ -116,11 +116,11 @@ export class ScreenCaptureManager {
         frameRate: trackSettings.frameRate,
         displaySurface: trackSettings.displaySurface,
         contentHint: videoTrack.contentHint,
-        hasSystemAudio: stream.getAudioTracks().length > 0,
+        hasAudio: stream.getAudioTracks().length > 0,
       },
       audioWarning:
-        includeSystemAudio && stream.getAudioTracks().length === 0
-          ? 'The browser did not provide system audio. Video sharing will continue.'
+        includeAudio && stream.getAudioTracks().length === 0
+          ? 'The browser did not provide shared audio. Video sharing will continue.'
           : undefined,
     };
   }

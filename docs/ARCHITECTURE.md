@@ -52,7 +52,7 @@ React renders state and invokes focused session objects. `PresenterSession` and 
 
 ## Media lifecycle
 
-The presenter calls `getDisplayMedia` only from a Start Sharing or Change Source user gesture. Text and Motion modes select distinct content hints and requested constraints. Microphone capture is never requested. A single captured video track, plus system audio only if the browser provides it, is attached to one independent `RTCPeerConnection` per approved viewer.
+The presenter calls `getDisplayMedia` only from a Start Sharing or Change Source user gesture. Text and Motion modes select distinct content hints and requested constraints. Shared audio is requested by default but can be disabled before capture; window selection prefers application audio when the browser supports it. Microphone capture is never requested. A single captured video track, plus shared audio if the browser provides it, is attached to one independent `RTCPeerConnection` per approved viewer.
 
 Invitation authentication always precedes admission. Public rooms immediately admit invitation holders while capacity remains. Approval-required rooms keep authenticated viewers pending and prohibit SDP exchange until the presenter approves them.
 

@@ -14,7 +14,7 @@ interface PresenterStageProps {
     captureMode?: CaptureMode;
     qualityStrategy?: QualityStrategy;
     codecMode?: CodecMode;
-    systemAudioRequested?: boolean;
+    audioRequested?: boolean;
   }) => void;
   onStartSharing: () => void;
   onChangeSource: () => void;
@@ -111,11 +111,11 @@ export function PresenterStage({
         <label className="presenter-stage__audio">
           <input
             type="checkbox"
-            checked={state.systemAudioRequested}
-            onChange={(event) => onSetPreferences({ systemAudioRequested: event.target.checked })}
+            checked={state.audioRequested}
+            onChange={(event) => onSetPreferences({ audioRequested: event.target.checked })}
             disabled={state.captureActive || state.ended}
           />
-          <span>System audio</span>
+          <span>Share audio</span>
         </label>
 
         <label className="presenter-stage__select">

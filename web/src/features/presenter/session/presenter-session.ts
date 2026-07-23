@@ -32,7 +32,7 @@ export interface PresenterSessionState {
   captureMode: CaptureMode;
   qualityStrategy: QualityStrategy;
   codecMode: CodecMode;
-  systemAudioRequested: boolean;
+  audioRequested: boolean;
   viewerUrl: string;
   peerStatuses: Readonly<Record<string, PresenterPeerStatus>>;
   warning: string | null;
@@ -59,7 +59,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
       captureMode: 'text',
       qualityStrategy: 'adaptive',
       codecMode: 'auto',
-      systemAudioRequested: false,
+      audioRequested: true,
       viewerUrl,
       peerStatuses: {},
       warning: null,
@@ -110,7 +110,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
     captureMode?: CaptureMode;
     qualityStrategy?: QualityStrategy;
     codecMode?: CodecMode;
-    systemAudioRequested?: boolean;
+    audioRequested?: boolean;
   }): Promise<void> {
     if (this.#state.captureActive && preferences.captureMode) {
       this.#patch({ warning: 'Capture mode changes apply when you change the source.' });
@@ -131,7 +131,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
     try {
       const result = await this.#capture.start(
         this.#state.captureMode,
-        this.#state.systemAudioRequested,
+        this.#state.audioRequested,
       );
       if (!this.#iceConfiguration) throw new Error('Signaling authentication is not complete.');
       await this.#connections.configure(
@@ -158,7 +158,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
     try {
       const result = await this.#capture.changeSource(
         this.#state.captureMode,
-        this.#state.systemAudioRequested,
+        this.#state.audioRequested,
         (stream) => this.#connections.replaceSource(stream),
       );
       this.#patch({
