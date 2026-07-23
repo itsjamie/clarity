@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 3 as const;
+export const PROTOCOL_VERSION = 4 as const;
 
 export function signalingUrl(location: Location = window.location): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';

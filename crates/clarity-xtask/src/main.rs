@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use clarity_protocol::{
     ApiError, ClientMessage, CreateRoomRequest, CreateRoomResponse, ErrorCode, IceConfiguration,
     IceServer, PeerRole, PeerSnapshot, ProtocolInfo, RoomAccessPolicy, RoomLifecycle, RoomSnapshot,
-    ServerMessage, ViewerState,
+    ServerMessage, SharingState, ViewerState,
 };
 use schemars::schema_for;
 use ts_rs::TS;
@@ -39,6 +39,7 @@ fn export_protocol() -> Result<()> {
         ProtocolInfo::decl(),
         PeerRole::decl(),
         RoomLifecycle::decl(),
+        SharingState::decl(),
         RoomAccessPolicy::decl(),
         ViewerState::decl(),
         ErrorCode::decl(),

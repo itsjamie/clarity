@@ -89,6 +89,7 @@ export function PresenterWorkspace(props: PresenterWorkspaceProps) {
             confirmEnd={confirmEnd}
             onSetPreferences={(preferences) => void session.setPreferences(preferences)}
             onStartSharing={() => void session.startSharing()}
+            onStopSharing={() => void session.pauseSharing()}
             onChangeSource={() => void session.changeSource()}
             onRequestEnd={() => setConfirmEnd(true)}
             onCancelEnd={() => setConfirmEnd(false)}

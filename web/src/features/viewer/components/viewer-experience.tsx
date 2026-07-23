@@ -206,7 +206,11 @@ export function ViewerExperience({
                       setSourceSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })
                     }
                   />
-                  {!state.stream ? <div className="negotiating-overlay">Negotiating secure media…</div> : null}
+                  {state.snapshot?.sharingState === 'paused' ? (
+                    <SharingPausedSlate />
+                  ) : !state.stream ? (
+                    <div className="negotiating-overlay">Negotiating secure media…</div>
+                  ) : null}
                 </div>
 
                 {diagnosticsOpen ? (
@@ -425,6 +429,19 @@ function TerminalState({ phase, error }: { phase: string; error: string | null }
       <p>{message}</p>
       <a className="button button--secondary" href="/">Return home</a>
     </section>
+  );
+}
+
+function SharingPausedSlate() {
+  return (
+    <div className="viewer-sharing-paused" role="status" aria-live="polite">
+      <span className="viewer-sharing-paused__icon" aria-hidden="true">
+        <i />
+        <i />
+      </span>
+      <strong>Sharing paused</strong>
+      <span>The presenter will resume with a new source.</span>
+    </div>
   );
 }
 

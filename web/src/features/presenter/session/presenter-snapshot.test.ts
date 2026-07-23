@@ -6,6 +6,7 @@ describe('presenter room events', () => {
     const snapshot: RoomSnapshot = {
       roomId: 'room',
       lifecycle: 'open',
+      sharingState: 'idle',
       accessPolicy: 'approvalRequired',
       maximumViewers: 4,
       expiresAt: '2026-01-01T00:00:00Z',

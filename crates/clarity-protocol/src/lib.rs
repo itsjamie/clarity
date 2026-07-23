@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +21,16 @@ pub enum RoomLifecycle {
     Open,
     Closed,
     Expired,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SharingState {
+    #[default]
+    Idle,
+    Live,
+    Paused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -143,6 +153,7 @@ pub struct PeerSnapshot {
 pub struct RoomSnapshot {
     pub room_id: String,
     pub lifecycle: RoomLifecycle,
+    pub sharing_state: SharingState,
     pub access_policy: RoomAccessPolicy,
     pub maximum_viewers: u8,
     pub expires_at: String,
@@ -181,6 +192,12 @@ pub enum ClientMessage {
     RoomClose {
         protocol_version: u16,
         request_id: String,
+    },
+    #[serde(rename = "room:update-sharing-state")]
+    RoomUpdateSharingState {
+        protocol_version: u16,
+        request_id: String,
+        sharing_state: SharingState,
     },
     #[serde(rename = "room:update-capacity")]
     RoomUpdateCapacity {
@@ -275,6 +292,9 @@ impl ClientMessage {
             | Self::RoomClose {
                 protocol_version, ..
             }
+            | Self::RoomUpdateSharingState {
+                protocol_version, ..
+            }
             | Self::RoomUpdateCapacity {
                 protocol_version, ..
             }
@@ -322,6 +342,7 @@ impl ClientMessage {
             | Self::AuthViewer { request_id, .. }
             | Self::SessionResume { request_id, .. }
             | Self::RoomClose { request_id, .. }
+            | Self::RoomUpdateSharingState { request_id, .. }
             | Self::RoomUpdateCapacity { request_id, .. }
             | Self::ViewerUpdateDisplayName { request_id, .. }
             | Self::ViewerApprove { request_id, .. }
@@ -367,6 +388,13 @@ pub enum ServerMessage {
         protocol_version: u16,
         server_timestamp: String,
         snapshot: RoomSnapshot,
+    },
+    #[serde(rename = "room:sharing-state-updated")]
+    RoomSharingStateUpdated {
+        protocol_version: u16,
+        request_id: String,
+        server_timestamp: String,
+        sharing_state: SharingState,
     },
     #[serde(rename = "room:closed")]
     RoomClosed {
@@ -528,5 +556,18 @@ mod tests {
 
         assert_eq!(value["type"], "viewer:update-display-name");
         assert_eq!(value["displayName"], "Jamie");
+    }
+
+    #[test]
+    fn sharing_state_updates_are_explicit_protocol_messages() {
+        let value = serde_json::to_value(ClientMessage::RoomUpdateSharingState {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "pause-1".into(),
+            sharing_state: SharingState::Paused,
+        })
+        .expect("serializes");
+
+        assert_eq!(value["type"], "room:update-sharing-state");
+        assert_eq!(value["sharingState"], "paused");
     }
 }

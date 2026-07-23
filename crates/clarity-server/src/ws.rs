@@ -428,6 +428,21 @@ async fn handle_authenticated_message(
             })
             .await
         }
+        ClientMessage::RoomUpdateSharingState {
+            request_id,
+            sharing_state,
+            ..
+        } => {
+            action(state, &session.room_id, |reply| {
+                RoomCommand::UpdateSharingState {
+                    source_peer_id: session.peer_id.clone(),
+                    sharing_state,
+                    request_id,
+                    reply,
+                }
+            })
+            .await
+        }
         ClientMessage::ViewerUpdateDisplayName {
             request_id,
             display_name,

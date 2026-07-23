@@ -52,7 +52,7 @@ test.describe('Clarity Share browser mesh', () => {
     await viewer.context.close();
   });
 
-  test('approves independent viewers, replaces the source, removes one, and ends cleanly', async ({ browser, page, baseURL }) => {
+  test('approves independent viewers, pauses and resumes sharing, removes one, and ends cleanly', async ({ browser, page, baseURL }) => {
     await enableSyntheticCapture(page);
     await page.goto('/');
     await selectApprovalRequired(page);
@@ -91,17 +91,39 @@ test.describe('Clarity Share browser mesh', () => {
     await expectViewerLive(first.page);
     await expectViewerLive(second.page);
 
+    await page.getByRole('button', { name: 'Stop sharing' }).click();
+    await expect(page.locator('#presenter-stage-status')).toHaveText('Sharing paused');
+    await expect(page.getByText('2 active', { exact: true })).toBeVisible();
+    await expect(first.page.getByText('Sharing paused', { exact: true })).toBeVisible();
+    await expect(second.page.getByText('Sharing paused', { exact: true })).toBeVisible();
+    await expect(first.page.getByRole('heading', { name: 'The share has ended' })).toHaveCount(0);
+    await expect(second.page.getByRole('heading', { name: 'The share has ended' })).toHaveCount(0);
+
+    const late = await joinViewer(browser, invite, 'Late Viewer');
+    await approveViewer(page, 'Late Viewer');
+    await expect(late.page.getByText('Sharing paused', { exact: true })).toBeVisible();
+    await expect(page.getByText('3 active', { exact: true })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Choose source to resume' }).click();
+    await expect(page.getByText("You're sharing your screen", { exact: true })).toBeVisible();
+    await expectViewerResolution(first.page, 1920, 1080);
+    await expectViewerResolution(second.page, 1920, 1080);
+    await expectViewerResolution(late.page, 1920, 1080);
+    await expect(late.page.getByText('Sharing paused', { exact: true })).toHaveCount(0);
+
     const graceCard = page.locator('.peer-card').filter({ hasText: 'Grace Viewer' });
     await graceCard.getByRole('button', { name: 'Remove viewer' }).click();
     await expect(second.page.getByRole('heading', { name: 'You were removed' })).toBeVisible();
     await expectViewerLive(first.page);
 
-    await page.getByRole('button', { name: 'Stop sharing' }).click();
+    await page.getByRole('button', { name: 'End room' }).click();
     await page.getByRole('button', { name: 'End room now' }).click();
     await expect(first.page.getByRole('heading', { name: 'The share has ended' })).toBeVisible();
+    await expect(late.page.getByRole('heading', { name: 'The share has ended' })).toBeVisible();
 
     await first.context.close();
     await second.context.close();
+    await late.context.close();
   });
 
   test('keeps the invitation secret out of HTTP-visible URL components and blocks a fifth approval', async ({ browser, page, baseURL }) => {
@@ -189,6 +211,13 @@ async function expectViewerLive(page: Page): Promise<void> {
     const element = video as HTMLVideoElement;
     return element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && element.videoWidth > 0;
   })).toBe(true);
+}
+
+async function expectViewerResolution(page: Page, width: number, height: number): Promise<void> {
+  await expect.poll(async () => page.locator('video').evaluate((video) => {
+    const element = video as HTMLVideoElement;
+    return [element.videoWidth, element.videoHeight];
+  })).toEqual([width, height]);
 }
 
 function metricValue(card: Locator, label: string): Locator {

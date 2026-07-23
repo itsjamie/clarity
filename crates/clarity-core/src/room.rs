@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use clarity_protocol::{
     ErrorCode, PROTOCOL_VERSION, PeerRole, PeerSnapshot, RoomAccessPolicy, RoomLifecycle,
-    RoomSnapshot, ServerMessage, ViewerState,
+    RoomSnapshot, ServerMessage, SharingState, ViewerState,
 };
 use secrecy::SecretString;
 use thiserror::Error;
@@ -189,6 +189,12 @@ pub enum RoomCommand {
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
+    UpdateSharingState {
+        source_peer_id: String,
+        sharing_state: SharingState,
+        request_id: String,
+        reply: oneshot::Sender<CommandResult>,
+    },
     UpdateViewerDisplayName {
         source_peer_id: String,
         display_name: Option<String>,
@@ -235,6 +241,7 @@ struct PeerSession {
 pub struct RoomState {
     room_id: String,
     lifecycle: RoomLifecycle,
+    sharing_state: SharingState,
     access_policy: RoomAccessPolicy,
     maximum_viewers: u8,
     maximum_viewers_hard_limit: u8,
@@ -257,6 +264,7 @@ impl std::fmt::Debug for RoomState {
             .debug_struct("RoomState")
             .field("room_id", &self.room_id)
             .field("lifecycle", &self.lifecycle)
+            .field("sharing_state", &self.sharing_state)
             .field("access_policy", &self.access_policy)
             .field("maximum_viewers", &self.maximum_viewers)
             .field("created_at", &self.created_at)
@@ -289,6 +297,7 @@ impl RoomState {
         Ok(Self {
             room_id,
             lifecycle: RoomLifecycle::Open,
+            sharing_state: SharingState::Idle,
             access_policy,
             maximum_viewers,
             maximum_viewers_hard_limit: config.maximum_viewers_hard_limit,
@@ -330,6 +339,7 @@ impl RoomState {
         RoomSnapshot {
             room_id: self.room_id.clone(),
             lifecycle: self.lifecycle,
+            sharing_state: self.sharing_state,
             access_policy: self.access_policy,
             maximum_viewers: self.maximum_viewers,
             expires_at: format_time(self.expires_at),
@@ -686,6 +696,27 @@ impl RoomState {
         Ok(())
     }
 
+    fn update_sharing_state(
+        &mut self,
+        source: &str,
+        sharing_state: SharingState,
+        request_id: String,
+        now: OffsetDateTime,
+    ) -> CommandResult {
+        self.ensure_open(now)?;
+        self.ensure_presenter(source)?;
+        self.sharing_state = sharing_state;
+        let message = ServerMessage::RoomSharingStateUpdated {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            server_timestamp: format_time(now),
+            sharing_state,
+        };
+        self.send_presenter(message.clone());
+        self.broadcast_all_viewers(message);
+        Ok(())
+    }
+
     fn update_viewer_display_name(
         &mut self,
         source: &str,
@@ -833,6 +864,14 @@ impl RoomState {
     fn broadcast_viewers(&mut self, message: ServerMessage) {
         for viewer in self.viewers.values_mut() {
             if viewer.viewer_state == Some(ViewerState::Approved) {
+                try_send(viewer, message.clone());
+            }
+        }
+    }
+
+    fn broadcast_all_viewers(&mut self, message: ServerMessage) {
+        for viewer in self.viewers.values_mut() {
+            if viewer.connected {
                 try_send(viewer, message.clone());
             }
         }
@@ -1162,6 +1201,9 @@ async fn run_room_actor(
                     RoomCommand::UpdateCapacity { source_peer_id, maximum_viewers, request_id, reply } => {
                         let _ = reply.send(room.update_capacity(&source_peer_id, maximum_viewers, request_id, now));
                     }
+                    RoomCommand::UpdateSharingState { source_peer_id, sharing_state, request_id, reply } => {
+                        let _ = reply.send(room.update_sharing_state(&source_peer_id, sharing_state, request_id, now));
+                    }
                     RoomCommand::UpdateViewerDisplayName { source_peer_id, display_name, request_id, reply } => {
                         let _ = reply.send(room.update_viewer_display_name(&source_peer_id, display_name, request_id, now));
                     }
@@ -1387,6 +1429,37 @@ mod tests {
             room.approve(&presenter.peer_id, &third.peer_id, "third".into(), now),
             Err(DomainError::RoomFull)
         );
+    }
+
+    #[test]
+    fn sharing_state_is_persisted_and_only_the_presenter_can_update_it() {
+        let (mut room, _, presenter_secret, viewer_secret, now) =
+            fixture_with_policy(RoomAccessPolicy::Public);
+        let presenter = room
+            .authenticate_presenter(&presenter_secret, session().0, now)
+            .expect("presenter");
+        let viewer = room
+            .authenticate_viewer(&viewer_secret, None, session().0, now)
+            .expect("viewer");
+
+        assert_eq!(room.snapshot().sharing_state, SharingState::Idle);
+        assert_eq!(
+            room.update_sharing_state(
+                &viewer.peer_id,
+                SharingState::Paused,
+                "forbidden".into(),
+                now,
+            ),
+            Err(DomainError::AuthorizationDenied)
+        );
+        room.update_sharing_state(
+            &presenter.peer_id,
+            SharingState::Paused,
+            "pause".into(),
+            now,
+        )
+        .expect("pause");
+        assert_eq!(room.snapshot().sharing_state, SharingState::Paused);
     }
 
     #[test]

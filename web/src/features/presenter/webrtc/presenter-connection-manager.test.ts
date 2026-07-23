@@ -60,6 +60,32 @@ describe('presenter connection manager reconfiguration', () => {
     expect(manager.statuses[0]?.profile.id).toBe('motion-high');
     manager.stopAll();
   });
+
+  it('pauses senders without closing peers and connects late viewers after resume', async () => {
+    const manager = createManager();
+    const resumedTrack = videoTrack('resumed');
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.setSource(streamWith(videoTrack('initial')));
+    await manager.addApprovedViewer('viewer-1');
+    const existingConnection = activeConnection();
+
+    await expect(manager.pauseSource()).resolves.toEqual([]);
+
+    expect(existingConnection.videoSender.replaceTrack).toHaveBeenLastCalledWith(null);
+    expect(existingConnection.connectionState).not.toBe('closed');
+    expect(manager.statuses).toHaveLength(1);
+
+    await manager.addApprovedViewer('viewer-2');
+    expect(FakePeerConnection.instances).toHaveLength(1);
+
+    const resumedStream = streamWith(resumedTrack);
+    await expect(manager.replaceSource(resumedStream)).resolves.toEqual([]);
+    await manager.setSource(resumedStream);
+
+    expect(existingConnection.videoSender.replaceTrack).toHaveBeenLastCalledWith(resumedTrack);
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    manager.stopAll();
+  });
 });
 
 function createManager(): PresenterConnectionManager {

@@ -188,6 +188,21 @@ export class PresenterConnectionManager {
     return failures;
   }
 
+  public async pauseSource(): Promise<string[]> {
+    const failures: string[] = [];
+    for (const entry of this.#entries.values()) {
+      try {
+        await entry.videoSender.replaceTrack(null);
+        await entry.audioSender?.replaceTrack(null);
+        this.#emit(entry);
+      } catch {
+        failures.push(entry.peerId);
+      }
+    }
+    this.#source = null;
+    return failures;
+  }
+
   public stopAll(): void {
     for (const peerId of [...this.#entries.keys()]) this.removeViewer(peerId);
     this.#approvedViewerIds.clear();

@@ -128,6 +128,37 @@
           "maximum": 65535,
           "minimum": 0
         },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "sharingState": {
+          "$ref": "#/$defs/SharingState"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:sharing-state-updated"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "sharingState"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
         "serverTimestamp": {
           "type": "string"
         },
@@ -878,17 +909,29 @@
         },
         "roomId": {
           "type": "string"
+        },
+        "sharingState": {
+          "$ref": "#/$defs/SharingState"
         }
       },
       "required": [
         "roomId",
         "lifecycle",
+        "sharingState",
         "accessPolicy",
         "maximumViewers",
         "expiresAt",
         "presenterConnected",
         "pendingViewers",
         "approvedViewers"
+      ]
+    },
+    "SharingState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "live",
+        "paused"
       ]
     },
     "ViewerState": {

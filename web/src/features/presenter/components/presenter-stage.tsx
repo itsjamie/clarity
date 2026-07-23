@@ -17,6 +17,7 @@ interface PresenterStageProps {
     audioRequested?: boolean;
   }) => void;
   onStartSharing: () => void;
+  onStopSharing: () => void;
   onChangeSource: () => void;
   onRequestEnd: () => void;
   onCancelEnd: () => void;
@@ -30,6 +31,7 @@ export function PresenterStage({
   confirmEnd,
   onSetPreferences,
   onStartSharing,
+  onStopSharing,
   onChangeSource,
   onRequestEnd,
   onCancelEnd,
@@ -46,6 +48,8 @@ export function PresenterStage({
     ? 'Room ended'
     : state.captureActive
       ? "You're sharing your screen"
+      : state.sharingPaused
+        ? 'Sharing paused'
       : state.signaling === 'connected'
         ? 'Ready to share'
         : 'Connecting to room';
@@ -55,37 +59,46 @@ export function PresenterStage({
       <header className="presenter-stage__header">
         <div className="presenter-stage__status heading-status">
           <i
-            className={`presenter-stage__status-dot${state.captureActive ? ' presenter-stage__status-dot--live' : ''}`}
+            className={`presenter-stage__status-dot${state.captureActive ? ' presenter-stage__status-dot--live' : ''}${state.sharingPaused ? ' presenter-stage__status-dot--paused' : ''}`}
             aria-hidden="true"
           />
           <strong id="presenter-stage-status">{statusLabel}</strong>
           <span aria-hidden="true">·</span>
           <span>{modeDescription} · {resolution} · {frameRate} FPS</span>
         </div>
-        {state.captureActive ? (
+        <div className="presenter-stage__header-actions">
+          {state.captureActive ? (
+            <Button variant="secondary" onClick={onStopSharing} disabled={state.ended}>
+              Stop sharing
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              onClick={onStartSharing}
+              disabled={state.signaling !== 'connected' || state.ended}
+            >
+              {state.sharingPaused ? 'Choose source to resume' : 'Start sharing'}
+            </Button>
+          )}
           <Button variant="danger" onClick={onRequestEnd} disabled={state.ended}>
-            Stop sharing
+            End room
           </Button>
-        ) : (
-          <Button
-            variant="primary"
-            onClick={onStartSharing}
-            disabled={state.signaling !== 'connected' || state.ended}
-          >
-            Start sharing
-          </Button>
-        )}
+        </div>
       </header>
 
       {confirmEnd ? (
         <div className="presenter-stage__confirm" role="alert">
-          <span>Stopping the share ends this room for every viewer.</span>
+          <span>Ending this room disconnects every viewer.</span>
           <Button variant="danger" onClick={onEndRoom}>End room now</Button>
-          <Button variant="quiet" onClick={onCancelEnd}>Keep sharing</Button>
+          <Button variant="quiet" onClick={onCancelEnd}>Keep room open</Button>
         </div>
       ) : null}
 
-      <LocalStreamPreview stream={state.previewStream} active={state.captureActive} />
+      <LocalStreamPreview
+        stream={state.previewStream}
+        active={state.captureActive}
+        paused={state.sharingPaused}
+      />
 
       <div className="presenter-stage__toolbar" aria-label="Sharing controls">
         <fieldset className="presenter-stage__mode" disabled={state.ended}>

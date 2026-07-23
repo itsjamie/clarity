@@ -3,7 +3,7 @@ use std::{collections::HashSet, net::SocketAddr};
 use clarity_core::{RoomActorConfig, TurnConfig};
 use clarity_protocol::{
     ClientMessage, CreateRoomRequest, CreateRoomResponse, ErrorCode, PROTOCOL_VERSION,
-    RoomAccessPolicy, ServerMessage,
+    RoomAccessPolicy, ServerMessage, SharingState,
 };
 use clarity_server::{AppConfig, AppState, build_router, config::Environment};
 use futures_util::{SinkExt, StreamExt};
@@ -384,6 +384,95 @@ async fn public_rooms_auto_admit_invited_viewers_and_reject_overflow() {
         next_server(&mut overflow).await,
         ServerMessage::AuthFailed {
             code: ErrorCode::RoomFull,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn sharing_state_is_broadcast_persisted_and_presenter_authorized() {
+    let server = spawn_server().await;
+    let room = create_public_room(&server, 3).await;
+    let (mut presenter, _, _) = authenticate_presenter(&server, &room).await;
+    let (mut viewer, _) = authenticate_viewer(&server, &room, "First").await;
+
+    send_client(
+        &mut presenter,
+        ClientMessage::RoomUpdateSharingState {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "pause".into(),
+            sharing_state: SharingState::Paused,
+        },
+    )
+    .await;
+    assert!(matches!(
+        wait_for(&mut presenter, |message| matches!(
+            message,
+            ServerMessage::RoomSharingStateUpdated {
+                sharing_state: SharingState::Paused,
+                ..
+            }
+        ))
+        .await,
+        ServerMessage::RoomSharingStateUpdated {
+            sharing_state: SharingState::Paused,
+            ..
+        }
+    ));
+    assert!(matches!(
+        wait_for(&mut viewer, |message| matches!(
+            message,
+            ServerMessage::RoomSharingStateUpdated {
+                sharing_state: SharingState::Paused,
+                ..
+            }
+        ))
+        .await,
+        ServerMessage::RoomSharingStateUpdated {
+            sharing_state: SharingState::Paused,
+            ..
+        }
+    ));
+
+    let invitation = Url::parse(&room.viewer_url).expect("viewer URL");
+    let mut late_viewer = connect_websocket(&server).await;
+    send_client(
+        &mut late_viewer,
+        ClientMessage::AuthViewer {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "late-auth".into(),
+            room_id: room.room_id.clone(),
+            viewer_secret: invitation.fragment().expect("fragment").into(),
+            display_name: Some("Late".into()),
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_server(&mut late_viewer).await,
+        ServerMessage::AuthSucceeded { snapshot, .. }
+            if snapshot.sharing_state == SharingState::Paused
+    ));
+
+    send_client(
+        &mut viewer,
+        ClientMessage::RoomUpdateSharingState {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "forbidden".into(),
+            sharing_state: SharingState::Live,
+        },
+    )
+    .await;
+    assert!(matches!(
+        wait_for(&mut viewer, |message| matches!(
+            message,
+            ServerMessage::Error {
+                code: ErrorCode::AuthorizationDenied,
+                ..
+            }
+        ))
+        .await,
+        ServerMessage::Error {
+            code: ErrorCode::AuthorizationDenied,
             ..
         }
     ));

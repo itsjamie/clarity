@@ -3,6 +3,7 @@ import type {
   IceConfiguration,
   RoomSnapshot,
   ServerMessage,
+  SharingState,
 } from '@/generated/protocol';
 import { PROTOCOL_VERSION, signalingUrl } from '@/config/environment';
 import { DiagnosticsCollector } from '@/lib/diagnostics/diagnostics-collector';
@@ -27,6 +28,7 @@ export interface PresenterSessionState {
   signaling: SignalingState;
   snapshot: RoomSnapshot | null;
   captureActive: boolean;
+  sharingPaused: boolean;
   previewStream: MediaStream | null;
   captureSettings: CaptureSettings | null;
   captureMode: CaptureMode;
@@ -47,6 +49,10 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
   readonly #connections: PresenterConnectionManager;
   readonly #capture: ScreenCaptureManager;
   #iceConfiguration: IceConfiguration | null = null;
+  #pausing = false;
+  #starting = false;
+  #captureOperationRevision = 0;
+  #sharingStateToSync: SharingState | null = null;
   #state: PresenterSessionState;
 
   public constructor(roomId: string, presenterSecret: string, viewerUrl: string) {
@@ -54,6 +60,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
       signaling: 'idle',
       snapshot: null,
       captureActive: false,
+      sharingPaused: false,
       previewStream: null,
       captureSettings: null,
       captureMode: 'text',
@@ -92,7 +99,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
       },
       diagnostics: this.#diagnostics,
     });
-    this.#capture = new ScreenCaptureManager(() => void this.endRoom());
+    this.#capture = new ScreenCaptureManager(() => void this.pauseSharing());
   }
 
   public getSnapshot = (): PresenterSessionState => this.#state;
@@ -127,12 +134,26 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
   }
 
   public async startSharing(): Promise<void> {
+    if (
+      this.#state.captureActive ||
+      this.#state.ended ||
+      this.#starting ||
+      this.#pausing
+    ) return;
+    this.#starting = true;
+    const operationRevision = ++this.#captureOperationRevision;
+    const resuming = this.#state.sharingPaused;
+    let sharingStateUpdateAttempted = false;
     this.#patch({ error: null, warning: null });
     try {
       const result = await this.#capture.start(
         this.#state.captureMode,
         this.#state.audioRequested,
       );
+      if (!this.#isCurrentCaptureOperation(operationRevision)) {
+        this.#capture.stop();
+        return;
+      }
       if (!this.#iceConfiguration) throw new Error('Signaling authentication is not complete.');
       await this.#connections.configure(
         this.#iceConfiguration,
@@ -140,17 +161,103 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
         this.#state.qualityStrategy,
         this.#state.codecMode,
       );
+      if (!this.#isCurrentCaptureOperation(operationRevision)) {
+        this.#capture.stop();
+        return;
+      }
+      if (resuming) {
+        const failures = await this.#connections.replaceSource(result.stream);
+        if (!this.#isCurrentCaptureOperation(operationRevision)) {
+          this.#capture.stop();
+          return;
+        }
+        if (failures.length > 0) {
+          throw new Error(`Could not resume sharing for ${failures.length} viewer connection(s).`);
+        }
+      }
       await this.#connections.setSource(result.stream);
+      try {
+        sharingStateUpdateAttempted = true;
+        this.#updateSharingState('live');
+      } catch (error) {
+        await this.#connections.pauseSource();
+        throw error;
+      }
       this.#patch({
         captureActive: true,
+        sharingPaused: false,
         previewStream: result.stream,
         captureSettings: result.settings,
         warning: result.audioWarning ?? null,
       });
-      this.#diagnostics.record('capture.started', result.settings);
+      this.#diagnostics.record(resuming ? 'capture.resumed' : 'capture.started', result.settings);
     } catch (error) {
       this.#capture.stop();
-      this.#patch({ error: errorMessage(error), captureActive: false, previewStream: null });
+      if (sharingStateUpdateAttempted) this.#sharingStateToSync = null;
+      if (!this.#isCurrentCaptureOperation(operationRevision)) return;
+      this.#patch({
+        error: errorMessage(error),
+        captureActive: false,
+        sharingPaused: resuming,
+        previewStream: null,
+        captureSettings: null,
+      });
+    } finally {
+      this.#starting = false;
+    }
+  }
+
+  public async pauseSharing(): Promise<void> {
+    if (
+      !this.#state.captureActive ||
+      this.#state.ended ||
+      this.#pausing ||
+      this.#starting
+    ) return;
+    this.#pausing = true;
+    const operationRevision = ++this.#captureOperationRevision;
+    let sharingStateUpdateAttempted = false;
+    try {
+      sharingStateUpdateAttempted = true;
+      this.#updateSharingState('paused');
+      const failures = await this.#connections.pauseSource();
+      if (!this.#isCurrentCaptureOperation(operationRevision)) {
+        return;
+      }
+      this.#capture.stop();
+      this.#patch({
+        captureActive: false,
+        sharingPaused: true,
+        previewStream: null,
+        captureSettings: null,
+        warning: failures.length > 0
+          ? `Sharing paused, but ${failures.length} viewer connection(s) could not pause cleanly.`
+          : null,
+        error: null,
+      });
+      this.#diagnostics.record('capture.paused', { replacementFailures: failures.length });
+    } catch (error) {
+      if (!this.#isCurrentCaptureOperation(operationRevision)) return;
+      const captureEnded = this.#capture.stream
+        ?.getVideoTracks()
+        .every((track) => track.readyState === 'ended') ?? false;
+      if (sharingStateUpdateAttempted && !captureEnded) {
+        this.#sharingStateToSync = null;
+      }
+      if (captureEnded) {
+        this.#capture.stop();
+        this.#patch({
+          captureActive: false,
+          sharingPaused: true,
+          previewStream: null,
+          captureSettings: null,
+          error: errorMessage(error),
+        });
+      } else {
+        this.#patch({ error: errorMessage(error) });
+      }
+    } finally {
+      this.#pausing = false;
     }
   }
 
@@ -215,6 +322,8 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
 
   public endRoom(): void {
     if (this.#state.ended) return;
+    this.#captureOperationRevision += 1;
+    this.#sharingStateToSync = null;
     this.#capture.stop();
     this.#connections.stopAll();
     try {
@@ -227,10 +336,18 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
       // Local media cleanup is authoritative even if signaling is already gone.
     }
     this.#signaling.disconnect(false);
-    this.#patch({ captureActive: false, previewStream: null, ended: true });
+    this.#patch({
+      captureActive: false,
+      sharingPaused: false,
+      previewStream: null,
+      captureSettings: null,
+      ended: true,
+    });
   }
 
   public disconnect(): void {
+    this.#captureOperationRevision += 1;
+    this.#sharingStateToSync = null;
     this.#capture.stop();
     this.#connections.stopAll();
     this.#signaling.disconnect();
@@ -252,7 +369,8 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
 
   async #handleMessage(message: ServerMessage): Promise<void> {
     switch (message.type) {
-      case 'auth:succeeded':
+      case 'auth:succeeded': {
+        const sharingStateToSync = this.#sharingStateToSync;
         this.#iceConfiguration = message.iceConfiguration;
         await this.#connections.configure(
           message.iceConfiguration,
@@ -261,7 +379,16 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
           this.#state.codecMode,
         );
         await this.#applySnapshot(message.snapshot);
+        if (sharingStateToSync) {
+          this.#patch({ sharingPaused: sharingStateToSync === 'paused' });
+          try {
+            this.#updateSharingState(sharingStateToSync);
+          } catch {
+            // The desired state remains queued for the next successful resume.
+          }
+        }
         break;
+      }
       case 'room:snapshot':
         await this.#applySnapshot(message.snapshot);
         break;
@@ -271,6 +398,17 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
             snapshot: { ...this.#state.snapshot, maximumViewers: message.maximumViewers },
           });
         }
+        break;
+      case 'room:sharing-state-updated':
+        if (this.#sharingStateToSync === message.sharingState) {
+          this.#sharingStateToSync = null;
+        }
+        this.#patch({
+          sharingPaused: message.sharingState === 'paused',
+          snapshot: this.#state.snapshot
+            ? { ...this.#state.snapshot, sharingState: message.sharingState }
+            : null,
+        });
         break;
       case 'viewer:left':
       case 'viewer:kicked':
@@ -311,9 +449,17 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
         break;
       case 'room:closed':
       case 'room:expired':
+        this.#captureOperationRevision += 1;
+        this.#sharingStateToSync = null;
         this.#capture.stop();
         this.#connections.stopAll();
-        this.#patch({ captureActive: false, previewStream: null, ended: true });
+        this.#patch({
+          captureActive: false,
+          sharingPaused: false,
+          previewStream: null,
+          captureSettings: null,
+          ended: true,
+        });
         break;
       case 'error':
       case 'auth:failed':
@@ -329,7 +475,10 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
   }
 
   async #applySnapshot(snapshot: RoomSnapshot): Promise<void> {
-    this.#patch({ snapshot });
+    this.#patch({
+      snapshot,
+      sharingPaused: snapshot.sharingState === 'paused',
+    });
     const approved = new Set(snapshot.approvedViewers.map((viewer) => viewer.peerId));
     for (const viewer of snapshot.approvedViewers) {
       await this.#connections.addApprovedViewer(viewer.peerId);
@@ -350,6 +499,20 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
     const next = { ...this.#state.peerStatuses };
     delete next[peerId];
     this.#patch({ peerStatuses: next });
+  }
+
+  #isCurrentCaptureOperation(revision: number): boolean {
+    return revision === this.#captureOperationRevision && !this.#state.ended;
+  }
+
+  #updateSharingState(sharingState: SharingState): void {
+    this.#sharingStateToSync = sharingState;
+    this.#send({
+      type: 'room:update-sharing-state',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: crypto.randomUUID(),
+      sharingState,
+    });
   }
 
   #patch(patch: Partial<PresenterSessionState>): void {

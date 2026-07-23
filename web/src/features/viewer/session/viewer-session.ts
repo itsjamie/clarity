@@ -151,6 +151,16 @@ export class ViewerSession implements ExternalStateStore<ViewerSessionState> {
         });
         break;
       }
+      case 'room:sharing-state-updated':
+        if (this.#state.snapshot) {
+          this.#patch({
+            snapshot: {
+              ...this.#state.snapshot,
+              sharingState: message.sharingState,
+            },
+          });
+        }
+        break;
       case 'viewer:approved':
         if (message.peerId === this.#selfPeerId) this.#patch({ phase: 'negotiating' });
         break;

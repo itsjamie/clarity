@@ -127,6 +127,33 @@
     {
       "type": "object",
       "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "sharingState": {
+          "$ref": "#/$defs/SharingState"
+        },
+        "type": {
+          "type": "string",
+          "const": "room:update-sharing-state"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "sharingState"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "maximumViewers": {
           "type": "integer",
           "format": "uint8",
@@ -472,5 +499,15 @@
         "nonce"
       ]
     }
-  ]
+  ],
+  "$defs": {
+    "SharingState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "live",
+        "paused"
+      ]
+    }
+  }
 }
