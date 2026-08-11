@@ -1,5 +1,6 @@
 import type { ClientMessage, PeerRole, ServerMessage } from '@/generated/protocol';
 import { PROTOCOL_VERSION } from '@/config/environment';
+import { identityChallengePayload } from '@/lib/identity/identity-challenge';
 import { parseServerMessage } from '@/lib/protocol/validate-message';
 import { storageKeys } from '@/lib/storage/session-storage';
 
@@ -12,6 +13,16 @@ export type SignalingState =
   | 'closed'
   | 'failed';
 
+/**
+ * Signs a friends-only identity challenge. The bytes are the domain-separated
+ * challenge payload (see `identityChallengePayload`), not the raw nonce.
+ * Resolves `null` when no identity is available, in which case the challenge
+ * goes unanswered and the server fails the authentication.
+ */
+export type SignalingIdentityProvider = (
+  payload: Uint8Array,
+) => Promise<{ publicKey: string; signature: string } | null>;
+
 interface SignalingClientOptions {
   url: string;
   roomId: string;
@@ -19,6 +30,7 @@ interface SignalingClientOptions {
   authentication: ClientMessage;
   onMessage: (message: ServerMessage) => void;
   onStateChange: (state: SignalingState) => void;
+  identity?: SignalingIdentityProvider;
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
   webSocketFactory?: (url: string) => WebSocket;
 }
@@ -78,6 +90,7 @@ export class SignalingClient {
     this.#setState(reconnecting ? 'reconnecting' : 'connecting');
     const socket = this.#webSocketFactory(this.#options.url);
     this.#socket = socket;
+    let resumeAttempted = false;
     socket.addEventListener('open', () => {
       if (this.#socket !== socket) {
         socket.close(1000, 'superseded');
@@ -87,6 +100,7 @@ export class SignalingClient {
       const token = this.#storage.getItem(
         storageKeys.resumeToken(this.#options.roomId, this.#options.role),
       );
+      resumeAttempted = token !== null;
       const authentication: ClientMessage = token
         ? {
             type: 'session:resume',
@@ -114,6 +128,11 @@ export class SignalingClient {
           });
           return;
         }
+        if (message.type === 'auth:identity-challenge') {
+          void this.#answerIdentityChallenge(socket, message.requestId, message.nonce);
+          this.#options.onMessage(message);
+          return;
+        }
         if (message.type === 'auth:succeeded') {
           this.#storage.setItem(
             storageKeys.resumeToken(this.#options.roomId, this.#options.role),
@@ -125,6 +144,20 @@ export class SignalingClient {
           this.#storage.removeItem(
             storageKeys.resumeToken(this.#options.roomId, this.#options.role),
           );
+          if (resumeAttempted && !this.#stopped) {
+            // The resume was rejected (expired grace, restarted server, …).
+            // The token is gone now, so a fresh connection re-runs the
+            // original authentication instead of surfacing a failure.
+            socket.close(1000, 'resume rejected');
+            this.#socket = null;
+            this.#open(true);
+            return;
+          }
+          // The original authentication was definitively rejected (bad
+          // secret, not on a friends-only allowlist, …). Reconnecting would
+          // re-run the identity challenge into the same rejection forever,
+          // so the client stops; recovery is a fresh connect().
+          this.#stopped = true;
           this.#setState('failed');
         }
         this.#options.onMessage(message);
@@ -140,6 +173,27 @@ export class SignalingClient {
     socket.addEventListener('error', () => {
       if (this.#socket === socket) socket.close();
     });
+  }
+
+  async #answerIdentityChallenge(socket: WebSocket, requestId: string, nonce: string): Promise<void> {
+    if (!this.#options.identity) return;
+    let proof: { publicKey: string; signature: string } | null = null;
+    try {
+      const payload = identityChallengePayload('room-auth', this.#options.url, nonce);
+      proof = await this.#options.identity(new TextEncoder().encode(payload));
+    } catch {
+      proof = null;
+    }
+    if (!proof || this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(
+      JSON.stringify({
+        type: 'auth:identity',
+        protocolVersion: PROTOCOL_VERSION,
+        requestId,
+        publicKey: proof.publicKey,
+        signature: proof.signature,
+      } satisfies ClientMessage),
+    );
   }
 
   #scheduleReconnect(): void {
