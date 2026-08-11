@@ -26,7 +26,7 @@ There is nothing for viewers to install and no meeting UI to work around. Send a
 
 ## Why Clarity Share?
 
-- **Detail-first capture.** Text and Motion modes target different frame-rate and bitrate profiles, up to a 2560 x 1440 capture target and 60 FPS where the browser, source, and network allow it.
+- **Detail-first capture.** Text and Motion modes target different frame-rate and bitrate profiles, with selectable 2560 x 1440 (default) or 3840 x 2160 capture targets and up to 60 FPS where the browser, source, and network allow it.
 - **A viewer made for the content.** Fit, zoom, fullscreen, volume, and diagnostics stay out of the way until needed.
 - **Independent quality per viewer.** Every admitted viewer gets a dedicated peer connection, encoding profile, stats collector, adaptation controller, and recovery path.
 - **Access that expires.** Rooms last from one to eight hours, accept one to ten viewers, and can admit anyone with the link or require presenter approval.
@@ -68,6 +68,7 @@ System audio is included only when the browser and selected source provide it. C
 ### Prerequisites
 
 - Rust 1.95 or newer with `rustfmt` and `clippy`
+- GStreamer 1.22+ development libraries with the base, good, and bad plugin sets (used by the native client crates); native screen sharing additionally uses the PipeWire GStreamer plugin and an xdg-desktop-portal at runtime
 - Node.js 24
 - pnpm 11.9 through Corepack
 
@@ -123,6 +124,10 @@ Clarity Share is a Rust workspace with a strict React/TypeScript frontend:
 | `crates/clarity-protocol` | Authoritative Serde models, JSON Schema, and generated TypeScript protocol types |
 | `crates/clarity-core` | Room actors, authorization, credential digests, lifecycle, and TURN credentials |
 | `crates/clarity-server` | Axum HTTP/WebSocket transport, rate limits, security headers, and embedded assets |
+| `crates/clarity-media` | WebRTC broadcast and playback engines for the native client, backed by GStreamer |
+| `crates/clarity-client` | Native presenter/viewer/presence sessions and the `clarity` CLI |
+| `crates/clarity-identity` | Device-local Ed25519 identity, friend codes, contacts, and settings |
+| `crates/clarity-desktop` | Native desktop GUI (`clarity-gui`, egui) |
 | `crates/clarity-xtask` | Deterministic export of protocol artifacts to the frontend |
 | `web` | React 19 application, WebRTC sessions, quality adaptation, and diagnostics |
 | `deploy` | Docker, Caddy, coturn, and single-VPS Compose configuration |

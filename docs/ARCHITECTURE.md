@@ -35,6 +35,24 @@ The global registry holds only room IDs and actor handles. Exactly one Tokio tas
 - `rate_limit`: bounded per-source and per-session token buckets.
 - `main`: structured logging, listener startup, signals, registry shutdown, and graceful drain.
 
+### `clarity-media`
+
+Media engine for native clients. `Playback` receives one presenter's WebRTC stream and renders it into a dedicated window: presenter offers and ICE candidates go in as protocol domain values, and the SDP answer, local candidates, connection states, and receive statistics come out on an event channel. Remote candidates are accepted in any order relative to the offer, repeated offers renegotiate the same connection, and missing audio is reported rather than failed. Codec preferences follow the presenter's offer order filtered to what the machine can decode, and the answer preserves the transport-wide congestion control extension the presenter's bandwidth ramp depends on.
+
+`Broadcast` sends one video source to up to the room's viewer capacity, each viewer on an independent connection with its own encoder, mirroring the per-viewer quality model of the web presenter. Video is encoded with hardware H.264 (NVENC) when available — a steady CBR bitrate at high resolution without CPU cost — and falls back to software VP8 otherwise; the source is normalized once to the chosen encoder's pixel format ahead of the tee, so per-viewer branches only encode. The broadcast is the offerer; viewer ids are caller-chosen, operations on unknown viewers are ignored, per-viewer bitrate is adjustable live, and pausing stops media flow without renegotiation. Sources are a synthetic test pattern or a screen capture: `CaptureStream` negotiates the compositor's ScreenCast portal — system picker, cursor embedding, and opt-in restore tokens for silent reuse — and hands `Broadcast` a live PipeWire stream that is revoked when the broadcast ends. By default no grant is retained anywhere and the picker appears on every run.
+
+Each adaptive viewer negotiates transport-wide congestion control and is steered by its own controller in the style of Google Congestion Control: delay overuse or heavy loss multiplicatively decreases the rate anchored to the observed receive rate, mild loss holds, and a clean window ramps toward the configured ceiling. Fixed viewers hold their ceiling regardless of feedback.
+
+Audio rides each viewer's connection as a second Opus stream with in-band FEC: the system mix (the default output's monitor) by default, or a mix of specific PipeWire playback streams — one application on its own, or the system's audio with named applications (a voice call, say) filtered out. The picked window cannot select its own audio automatically, because the ScreenCast portal does not disclose which application owns a window and has no audio channel at all; per-application audio is therefore resolved client-side against the applications currently playing, snapshotted when sharing starts. An audio source that cannot be captured downgrades the broadcast to video-only rather than failing, and pause stops both streams without renegotiation.
+
+GStreamer is the hidden implementation of both engines and does not cross the crate boundary. `CLARITY_MEDIA_HEADLESS` consumes media without a window or audio device for tests and displayless environments.
+
+### `clarity-client`
+
+The native client binary (`clarity`). A signaling client owns the WebSocket lifecycle — authentication, session resume, heartbeat replies, and the same bounded reconnect backoff as the web client — and sends the exact `Origin` the server allowlists, derived from the invitation or server URL. `ViewerSession` mirrors the web viewer session's state machine and drives one `Playback`; `PresenterSession` mirrors the web presenter's admission model, treating the server's room snapshot as the authority on which viewer connections exist, and drives one `Broadcast`. `clarity view <invitation-url>` joins a room as a viewer; `clarity present` creates a room over HTTP, prints the viewer invitation, and streams until the room ends. Secrets are parsed once and never logged.
+
+Peer recovery mirrors the web presenter. A viewer connection that fails triggers an ICE restart; if it has not recovered within an eight-second grace window, the presenter tears that connection down and rebuilds it from a fresh encoder and transport, and the viewer recreates its `Playback` when the resulting plain offer arrives over an existing connection. A viewer that detects its own connection failing asks the presenter to restart, covering asymmetric breaks. A signaling reconnect never disturbs media: re-authentication with the resume token keeps the broadcast and every viewer connection running, refreshing only ICE configuration in case TURN credentials rotated.
+
 ## Frontend dependency direction
 
 The frontend follows Bulletproof React's feature-oriented structure:
@@ -52,7 +70,7 @@ React renders state and invokes focused session objects. `PresenterSession` and 
 
 ## Media lifecycle
 
-The presenter calls `getDisplayMedia` only from a Start Sharing or Change Source user gesture. Text and Motion modes select distinct content hints and requested constraints. Shared audio is requested by default but can be disabled before capture; window selection prefers application audio when the browser supports it. Microphone capture is never requested. A single captured video track, plus shared audio if the browser provides it, is attached to one independent `RTCPeerConnection` per approved viewer.
+The presenter calls `getDisplayMedia` only from a Start Sharing or Change Source user gesture. Text and Motion modes select distinct content hints and requested constraints. Capture resolution defaults to 2560 x 1440 and can be raised to 3840 x 2160; the target is applied directly to the browser-native capture track without an application canvas or extra scaling pass. Shared audio is requested by default but can be disabled before capture; window selection prefers application audio when the browser supports it. Microphone capture is never requested. A single captured video track, plus shared audio if the browser provides it, is attached to one independent `RTCPeerConnection` per approved viewer.
 
 Invitation authentication always precedes admission. Public rooms immediately admit invitation holders while capacity remains. Approval-required rooms keep authenticated viewers pending and prohibit SDP exchange until the presenter approves them.
 
