@@ -15,8 +15,8 @@ use axum::{
     routing::{get, post},
 };
 use clarity_core::{
-    DEFAULT_APPROVAL_VIEWERS, DEFAULT_PUBLIC_VIEWERS, RoomRegistry, SecretDigestService,
-    TurnCredentialService, secret_as_str,
+    DEFAULT_APPROVAL_VIEWERS, DEFAULT_PUBLIC_VIEWERS, PresenceRegistry, RoomEvent, RoomRegistry,
+    SecretDigestService, SystemClock, TurnCredentialService, secret_as_str,
 };
 use clarity_protocol::{
     ApiError, CreateRoomRequest, CreateRoomResponse, ErrorCode, PROTOCOL_VERSION, RoomAccessPolicy,
@@ -40,6 +40,7 @@ use crate::{AppConfig, config::Environment, rate_limit::RateLimitService, ws};
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub registry: RoomRegistry,
+    pub presence: PresenceRegistry,
     pub turn: Arc<TurnCredentialService>,
     pub rate_limits: RateLimitService,
     ready: Arc<AtomicBool>,
@@ -61,11 +62,29 @@ impl AppState {
             config.room_token_hmac_key.clone(),
             config.resume_token_hmac_key.clone(),
         ));
-        let registry = RoomRegistry::new(secrets, config.room_actor.clone());
+        // Room actors report viewer-count/sharing/close changes on this
+        // channel; a forwarder task reflects them into friend presence.
+        let (room_events, mut room_events_rx) = tokio::sync::mpsc::channel::<RoomEvent>(256);
+        let registry = RoomRegistry::new(secrets, config.room_actor.clone()).with_events(room_events);
+        let presence = PresenceRegistry::new(Arc::new(SystemClock));
+        let presence_sink = presence.clone();
+        tokio::spawn(async move {
+            while let Some(event) = room_events_rx.recv().await {
+                match event {
+                    RoomEvent::Updated {
+                        room_id,
+                        approved_viewers,
+                        sharing_state,
+                    } => presence_sink.room_updated(room_id, approved_viewers, sharing_state),
+                    RoomEvent::Closed { room_id } => presence_sink.room_closed(room_id),
+                }
+            }
+        });
         let turn = Arc::new(TurnCredentialService::new(config.turn.clone()));
         Self {
             config: Arc::new(config),
             registry,
+            presence,
             turn,
             rate_limits: RateLimitService::per_minute(),
             ready: Arc::new(AtomicBool::new(true)),
@@ -85,6 +104,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/readyz", get(ready))
         .route("/api/v1/rooms", post(create_room))
         .route("/api/v1/ws", get(ws::upgrade))
+        .route("/api/v1/presence", get(crate::presence_ws::upgrade))
         .fallback(spa_fallback)
         .with_state(state)
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -159,8 +179,9 @@ async fn create_room(
         )
     })?;
     let access_policy = request.access_policy.unwrap_or(RoomAccessPolicy::Public);
+    let allowed_friend_codes = validate_friend_codes(access_policy, request.allowed_friend_codes)?;
     let maximum_viewers = request.maximum_viewers.unwrap_or(match access_policy {
-        RoomAccessPolicy::Public => DEFAULT_PUBLIC_VIEWERS,
+        RoomAccessPolicy::Public | RoomAccessPolicy::FriendsOnly => DEFAULT_PUBLIC_VIEWERS,
         RoomAccessPolicy::ApprovalRequired => DEFAULT_APPROVAL_VIEWERS,
     });
     let ttl = request
@@ -177,7 +198,7 @@ async fn create_room(
     }
     let created = state
         .registry
-        .create_room(maximum_viewers, ttl, access_policy)
+        .create_room(maximum_viewers, ttl, access_policy, allowed_friend_codes)
         .await
         .map_err(AppError::from_domain)?;
     let mut viewer_url = state
@@ -185,8 +206,14 @@ async fn create_room(
         .public_base_url
         .join(&format!("r/{}", created.room_id))
         .map_err(|_| AppError::internal())?;
-    if created.access_policy == RoomAccessPolicy::Public {
-        viewer_url.query_pairs_mut().append_pair("access", "public");
+    match created.access_policy {
+        RoomAccessPolicy::Public => {
+            viewer_url.query_pairs_mut().append_pair("access", "public");
+        }
+        RoomAccessPolicy::FriendsOnly => {
+            viewer_url.query_pairs_mut().append_pair("access", "friends");
+        }
+        RoomAccessPolicy::ApprovalRequired => {}
     }
     viewer_url.set_fragment(Some(secret_as_str(&created.viewer_secret)));
     let response = CreateRoomResponse {
@@ -207,6 +234,41 @@ async fn create_room(
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
         Json(response),
     ))
+}
+
+/// The most friend codes a friends-only room may allowlist.
+const MAXIMUM_ALLOWED_FRIEND_CODES: usize = 64;
+
+/// Normalizes the allowlist for a friends-only room. Rejects a missing or
+/// empty list, any malformed code, and lists past the size bound; policies
+/// other than `FriendsOnly` never carry an allowlist.
+fn validate_friend_codes(
+    access_policy: RoomAccessPolicy,
+    allowed_friend_codes: Option<Vec<String>>,
+) -> Result<Vec<String>, AppError> {
+    if access_policy != RoomAccessPolicy::FriendsOnly {
+        return Ok(Vec::new());
+    }
+    let codes = allowed_friend_codes.unwrap_or_default();
+    if codes.is_empty() || codes.len() > MAXIMUM_ALLOWED_FRIEND_CODES {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidMessage,
+            "A friends-only room needs between one and sixty-four friend codes.",
+        ));
+    }
+    codes
+        .iter()
+        .map(|code| {
+            clarity_protocol::code::normalize(code).ok_or_else(|| {
+                AppError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidMessage,
+                    "An allowed friend code is not a valid code.",
+                )
+            })
+        })
+        .collect()
 }
 
 pub fn validate_origin(config: &AppConfig, headers: &HeaderMap) -> Result<(), AppError> {

@@ -9,13 +9,18 @@ export type RoomLifecycle = "open" | "closed" | "expired";
 
 export type SharingState = "idle" | "live" | "paused";
 
-export type RoomAccessPolicy = "public" | "approvalRequired";
+export type RoomAccessPolicy = "public" | "approvalRequired" | "friendsOnly";
 
 export type ViewerState = "pending" | "approved" | "disconnected" | "rejected" | "kicked";
 
 export type ErrorCode = "unsupported_protocol_version" | "invalid_message" | "authentication_required" | "authentication_failed" | "authorization_denied" | "room_not_found" | "room_full" | "room_expired" | "room_closed" | "viewer_not_found" | "viewer_not_approved" | "pending_viewer_limit_reached" | "invalid_destination" | "invalid_capacity" | "message_too_large" | "rate_limited" | "session_expired" | "origin_rejected" | "internal";
 
-export type CreateRoomRequest = { maximumViewers: number | null, expiresInSeconds: number | null, accessPolicy: RoomAccessPolicy | null, };
+export type CreateRoomRequest = { maximumViewers: number | null, expiresInSeconds: number | null, accessPolicy: RoomAccessPolicy | null, 
+/**
+ * Friend codes permitted to join. Required (and non-empty) when
+ * `access_policy` is `FriendsOnly`; ignored otherwise.
+ */
+allowedFriendCodes: Array<string> | null, };
 
 export type CreateRoomResponse = { protocolVersion: number, roomId: string, presenterSecret: string, presenterPath: string, viewerUrl: string, expiresAt: string, maximumViewers: number, accessPolicy: RoomAccessPolicy, };
 
@@ -25,10 +30,93 @@ export type IceServer = { urls: Array<string>, username: string | null, credenti
 
 export type IceConfiguration = { expiresAt: string, iceServers: Array<IceServer>, };
 
-export type PeerSnapshot = { peerId: string, displayName: string | null, role: PeerRole, viewerState: ViewerState | null, connected: boolean, joinedAt: string, };
+export type PeerSnapshot = { peerId: string, displayName: string | null, role: PeerRole, viewerState: ViewerState | null, connected: boolean, joinedAt: string, 
+/**
+ * The peer's friend code, present when the peer proved its identity
+ * during authentication (friends-only rooms).
+ */
+friendCode: string | null, };
 
-export type RoomSnapshot = { roomId: string, lifecycle: RoomLifecycle, sharingState: SharingState, accessPolicy: RoomAccessPolicy, maximumViewers: number, expiresAt: string, presenterConnected: boolean, pendingViewers: Array<PeerSnapshot>, approvedViewers: Array<PeerSnapshot>, };
+export type RoomSnapshot = { roomId: string, lifecycle: RoomLifecycle, sharingState: SharingState, accessPolicy: RoomAccessPolicy, maximumViewers: number, expiresAt: string, 
+/**
+ * Seconds until the room expires, measured on the server clock when the
+ * snapshot was taken, so clients can render remaining time without
+ * trusting their own clock.
+ */
+expiresInSeconds: number, presenterConnected: boolean, pendingViewers: Array<PeerSnapshot>, approvedViewers: Array<PeerSnapshot>, };
 
-export type ClientMessage = { "type": "auth:presenter", protocolVersion: number, requestId: string, roomId: string, presenterSecret: string, } | { "type": "auth:viewer", protocolVersion: number, requestId: string, roomId: string, viewerSecret: string, displayName: string | null, } | { "type": "session:resume", protocolVersion: number, requestId: string, roomId: string, resumeToken: string, } | { "type": "room:close", protocolVersion: number, requestId: string, } | { "type": "room:update-sharing-state", protocolVersion: number, requestId: string, sharingState: SharingState, } | { "type": "room:update-capacity", protocolVersion: number, requestId: string, maximumViewers: number, } | { "type": "viewer:update-display-name", protocolVersion: number, requestId: string, displayName: string | null, } | { "type": "viewer:approve", protocolVersion: number, requestId: string, peerId: string, } | { "type": "viewer:reject", protocolVersion: number, requestId: string, peerId: string, } | { "type": "viewer:kick", protocolVersion: number, requestId: string, peerId: string, } | { "type": "peer:leave", protocolVersion: number, requestId: string, } | { "type": "signal:offer", protocolVersion: number, requestId: string, destinationPeerId: string, sdp: string, iceRestart: boolean, } | { "type": "signal:answer", protocolVersion: number, requestId: string, destinationPeerId: string, sdp: string, } | { "type": "signal:ice-candidate", protocolVersion: number, requestId: string, destinationPeerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null, } | { "type": "signal:ice-restart", protocolVersion: number, requestId: string, destinationPeerId: string, } | { "type": "ice:refresh", protocolVersion: number, requestId: string, } | { "type": "heartbeat:pong", protocolVersion: number, nonce: string, };
+export type ChatMessage = { sender: string, text: string, };
 
-export type ServerMessage = { "type": "auth:succeeded", protocolVersion: number, requestId: string, serverTimestamp: string, roomId: string, peerId: string, role: PeerRole, resumeToken: string, resumeExpiresAt: string, snapshot: RoomSnapshot, iceConfiguration: IceConfiguration, } | { "type": "auth:failed", protocolVersion: number, requestId: string, serverTimestamp: string, code: ErrorCode, message: string, } | { "type": "room:snapshot", protocolVersion: number, serverTimestamp: string, snapshot: RoomSnapshot, } | { "type": "room:sharing-state-updated", protocolVersion: number, requestId: string, serverTimestamp: string, sharingState: SharingState, } | { "type": "room:closed", protocolVersion: number, serverTimestamp: string, } | { "type": "room:expired", protocolVersion: number, serverTimestamp: string, } | { "type": "room:capacity-updated", protocolVersion: number, requestId: string, serverTimestamp: string, maximumViewers: number, } | { "type": "viewer:display-name-updated", protocolVersion: number, requestId: string, serverTimestamp: string, peerId: string, displayName: string | null, } | { "type": "presenter:disconnected", protocolVersion: number, serverTimestamp: string, } | { "type": "presenter:resumed", protocolVersion: number, serverTimestamp: string, } | { "type": "viewer:pending", protocolVersion: number, serverTimestamp: string, viewer: PeerSnapshot, } | { "type": "viewer:approved", protocolVersion: number, requestId: string | null, serverTimestamp: string, peerId: string, } | { "type": "viewer:rejected", protocolVersion: number, requestId: string | null, serverTimestamp: string, peerId: string, } | { "type": "viewer:kicked", protocolVersion: number, requestId: string | null, serverTimestamp: string, peerId: string, } | { "type": "viewer:left", protocolVersion: number, serverTimestamp: string, peerId: string, } | { "type": "viewer:resumed", protocolVersion: number, serverTimestamp: string, peerId: string, } | { "type": "signal:offer", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, sdp: string, iceRestart: boolean, } | { "type": "signal:answer", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, sdp: string, } | { "type": "signal:ice-candidate", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null, } | { "type": "signal:ice-restart", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, } | { "type": "ice:configuration", protocolVersion: number, requestId: string, serverTimestamp: string, configuration: IceConfiguration, } | { "type": "heartbeat:ping", protocolVersion: number, serverTimestamp: string, nonce: string, } | { "type": "error", protocolVersion: number, requestId: string | null, serverTimestamp: string, code: ErrorCode, message: string, };
+export type HostedRoom = { roomId: string, viewerUrl: string, viewerCount: number, sharingState: SharingState, };
+
+export type FriendPresence = { 
+/**
+ * The friend's code (`clr-XXXX-XXXX`).
+ */
+code: string, online: boolean, 
+/**
+ * Present when the friend is sharing a room.
+ */
+hosting: HostedRoom | null, 
+/**
+ * How long ago the friend was last seen, `None` while online. Tracked
+ * in memory only, so it resets when the server restarts.
+ */
+lastSeenSecondsAgo: number | null, };
+
+export type ClientMessage = { "type": "auth:presenter", protocolVersion: number, requestId: string, roomId: string, presenterSecret: string, } | { "type": "auth:viewer", protocolVersion: number, requestId: string, roomId: string, viewerSecret: string, displayName: string | null, } | { "type": "auth:identity", protocolVersion: number, requestId: string, 
+/**
+ * Base64 of the 32-byte Ed25519 public key. The server derives the
+ * friend code from it, so the client never asserts its own code.
+ */
+publicKey: string, 
+/**
+ * Base64 Ed25519 signature over the UTF-8 bytes of
+ * [`identity_challenge_payload`] with the
+ * [`IDENTITY_CONTEXT_ROOM_AUTH`] context.
+ */
+signature: string, } | { "type": "session:resume", protocolVersion: number, requestId: string, roomId: string, resumeToken: string, } | { "type": "room:close", protocolVersion: number, requestId: string, } | { "type": "room:update-sharing-state", protocolVersion: number, requestId: string, sharingState: SharingState, } | { "type": "room:update-capacity", protocolVersion: number, requestId: string, maximumViewers: number, } | { "type": "viewer:update-display-name", protocolVersion: number, requestId: string, displayName: string | null, } | { "type": "viewer:approve", protocolVersion: number, requestId: string, peerId: string, } | { "type": "viewer:reject", protocolVersion: number, requestId: string, peerId: string, } | { "type": "viewer:kick", protocolVersion: number, requestId: string, peerId: string, } | { "type": "peer:leave", protocolVersion: number, requestId: string, } | { "type": "signal:offer", protocolVersion: number, requestId: string, destinationPeerId: string, sdp: string, iceRestart: boolean, } | { "type": "signal:answer", protocolVersion: number, requestId: string, destinationPeerId: string, sdp: string, } | { "type": "signal:ice-candidate", protocolVersion: number, requestId: string, destinationPeerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null, } | { "type": "signal:ice-restart", protocolVersion: number, requestId: string, destinationPeerId: string, } | { "type": "ice:refresh", protocolVersion: number, requestId: string, } | { "type": "heartbeat:pong", protocolVersion: number, nonce: string, };
+
+export type ServerMessage = { "type": "auth:succeeded", protocolVersion: number, requestId: string, serverTimestamp: string, roomId: string, peerId: string, role: PeerRole, resumeToken: string, resumeExpiresAt: string, snapshot: RoomSnapshot, iceConfiguration: IceConfiguration, } | { "type": "auth:identity-challenge", protocolVersion: number, requestId: string, serverTimestamp: string, 
+/**
+ * Nonce the viewer must sign with its Ed25519 key (via
+ * `auth:identity`) to prove its friend code for a friends-only room.
+ */
+nonce: string, } | { "type": "auth:failed", protocolVersion: number, requestId: string, serverTimestamp: string, code: ErrorCode, message: string, } | { "type": "room:snapshot", protocolVersion: number, serverTimestamp: string, snapshot: RoomSnapshot, } | { "type": "room:sharing-state-updated", protocolVersion: number, requestId: string, serverTimestamp: string, sharingState: SharingState, } | { "type": "room:closed", protocolVersion: number, serverTimestamp: string, } | { "type": "room:expired", protocolVersion: number, serverTimestamp: string, } | { "type": "room:capacity-updated", protocolVersion: number, requestId: string, serverTimestamp: string, maximumViewers: number, } | { "type": "viewer:display-name-updated", protocolVersion: number, requestId: string, serverTimestamp: string, peerId: string, displayName: string | null, } | { "type": "presenter:disconnected", protocolVersion: number, serverTimestamp: string, } | { "type": "presenter:resumed", protocolVersion: number, serverTimestamp: string, } | { "type": "viewer:pending", protocolVersion: number, serverTimestamp: string, viewer: PeerSnapshot, } | { "type": "viewer:approved", protocolVersion: number, requestId: string | null, serverTimestamp: string, peerId: string, } | { "type": "viewer:rejected", protocolVersion: number, requestId: string | null, serverTimestamp: string, peerId: string, } | { "type": "viewer:kicked", protocolVersion: number, requestId: string | null, serverTimestamp: string, peerId: string, } | { "type": "viewer:left", protocolVersion: number, serverTimestamp: string, peerId: string, } | { "type": "viewer:resumed", protocolVersion: number, serverTimestamp: string, peerId: string, } | { "type": "signal:offer", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, sdp: string, iceRestart: boolean, } | { "type": "signal:answer", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, sdp: string, } | { "type": "signal:ice-candidate", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, candidate: string, sdpMid: string | null, sdpMLineIndex: number | null, } | { "type": "signal:ice-restart", protocolVersion: number, requestId: string, serverTimestamp: string, sourcePeerId: string, } | { "type": "ice:configuration", protocolVersion: number, requestId: string, serverTimestamp: string, configuration: IceConfiguration, } | { "type": "heartbeat:ping", protocolVersion: number, serverTimestamp: string, nonce: string, } | { "type": "error", protocolVersion: number, requestId: string | null, serverTimestamp: string, code: ErrorCode, message: string, };
+
+export type PresenceClientMessage = { "type": "presence:hello", protocolVersion: number, 
+/**
+ * Base64 of the 32-byte Ed25519 public key. The server derives the
+ * friend code from it, so the client never asserts its own code.
+ */
+publicKey: string, 
+/**
+ * Base64 Ed25519 signature over the UTF-8 bytes of
+ * [`identity_challenge_payload`] with the
+ * [`IDENTITY_CONTEXT_PRESENCE`] context.
+ */
+signature: string, } | { "type": "presence:subscribe", protocolVersion: number, 
+/**
+ * The full set of friend codes to watch; replaces any previous set.
+ */
+codes: Array<string>, } | { "type": "presence:announce", protocolVersion: number, 
+/**
+ * The room being hosted now, or `None` when not sharing.
+ */
+hosting: HostedRoom | null, 
+/**
+ * The room's presenter secret, proving the announcer hosts the
+ * announced room. Required when `hosting` is `Some`; the server
+ * drops announcements it cannot verify. Never forwarded to friends.
+ */
+presenterSecret: string | null, };
+
+export type PresenceServerMessage = { "type": "presence:challenge", protocolVersion: number, serverTimestamp: string, nonce: string, } | { "type": "presence:ready", protocolVersion: number, serverTimestamp: string, 
+/**
+ * The friend code the server derived from the presented public key.
+ */
+code: string, } | { "type": "presence:snapshot", protocolVersion: number, serverTimestamp: string, 
+/**
+ * Every currently-visible friend (mutually added and online).
+ */
+friends: Array<FriendPresence>, } | { "type": "presence:update", protocolVersion: number, serverTimestamp: string, friend: FriendPresence, } | { "type": "error", protocolVersion: number, serverTimestamp: string, code: ErrorCode, message: string, };

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use clarity_protocol::{
     ErrorCode, PROTOCOL_VERSION, PeerRole, PeerSnapshot, RoomAccessPolicy, RoomLifecycle,
@@ -6,10 +9,11 @@ use clarity_protocol::{
 };
 use secrecy::SecretString;
 use thiserror::Error;
-use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{Duration, OffsetDateTime};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, warn};
 
+use crate::clock::format_time;
 use crate::{Clock, SecretDigest, SecretDigestService, SystemClock};
 
 pub const MAXIMUM_VIEWERS_LIMIT: u8 = 10;
@@ -22,6 +26,10 @@ pub type CommandResult<T = ()> = Result<T, DomainError>;
 pub enum DomainError {
     #[error("authentication failed")]
     AuthenticationFailed,
+    #[error("a proven identity is required to join this room")]
+    IdentityRequired,
+    #[error("the resumable session has expired")]
+    SessionExpired,
     #[error("authorization denied")]
     AuthorizationDenied,
     #[error("room is full")]
@@ -53,6 +61,8 @@ impl DomainError {
     pub const fn code(&self) -> ErrorCode {
         match self {
             Self::AuthenticationFailed => ErrorCode::AuthenticationFailed,
+            Self::IdentityRequired => ErrorCode::AuthenticationRequired,
+            Self::SessionExpired => ErrorCode::SessionExpired,
             Self::AuthorizationDenied => ErrorCode::AuthorizationDenied,
             Self::RoomFull => ErrorCode::RoomFull,
             Self::RoomExpired => ErrorCode::RoomExpired,
@@ -157,6 +167,9 @@ pub enum RoomCommand {
     AuthenticateViewer {
         credential: SecretString,
         display_name: Option<String>,
+        /// The viewer's friend code, verified by the transport via the
+        /// identity challenge. Required for friends-only rooms.
+        friend_code: Option<String>,
         session: SessionHandle,
         reply: oneshot::Sender<CommandResult<AuthOutcome>>,
     },
@@ -221,6 +234,13 @@ pub enum RoomCommand {
     Snapshot {
         reply: oneshot::Sender<RoomSnapshot>,
     },
+    /// Checks a presenter credential without creating or touching a session.
+    /// Used by the presence channel to prove a hosting announcement comes
+    /// from the room's presenter.
+    VerifyPresenter {
+        credential: SecretString,
+        reply: oneshot::Sender<bool>,
+    },
     Shutdown,
 }
 
@@ -229,6 +249,7 @@ struct PeerSession {
     peer_id: String,
     role: PeerRole,
     display_name: Option<String>,
+    friend_code: Option<String>,
     viewer_state: Option<ViewerState>,
     joined_at: OffsetDateTime,
     connected: bool,
@@ -243,6 +264,7 @@ pub struct RoomState {
     lifecycle: RoomLifecycle,
     sharing_state: SharingState,
     access_policy: RoomAccessPolicy,
+    allowed_friend_codes: HashSet<String>,
     maximum_viewers: u8,
     maximum_viewers_hard_limit: u8,
     maximum_pending_viewers: usize,
@@ -284,6 +306,7 @@ impl RoomState {
         room_id: String,
         maximum_viewers: u8,
         access_policy: RoomAccessPolicy,
+        allowed_friend_codes: HashSet<String>,
         created_at: OffsetDateTime,
         expires_at: OffsetDateTime,
         presenter_digest: SecretDigest,
@@ -299,6 +322,7 @@ impl RoomState {
             lifecycle: RoomLifecycle::Open,
             sharing_state: SharingState::Idle,
             access_policy,
+            allowed_friend_codes,
             maximum_viewers,
             maximum_viewers_hard_limit: config.maximum_viewers_hard_limit,
             maximum_pending_viewers: config.maximum_pending_viewers,
@@ -316,7 +340,7 @@ impl RoomState {
     }
 
     #[must_use]
-    pub fn snapshot(&self) -> RoomSnapshot {
+    pub fn snapshot(&self, now: OffsetDateTime) -> RoomSnapshot {
         let mut pending_viewers = self
             .viewers
             .values()
@@ -343,10 +367,37 @@ impl RoomState {
             access_policy: self.access_policy,
             maximum_viewers: self.maximum_viewers,
             expires_at: format_time(self.expires_at),
+            expires_in_seconds: u64::try_from((self.expires_at - now).whole_seconds()).unwrap_or(0),
             presenter_connected: self.presenter.as_ref().is_some_and(|peer| peer.connected),
             pending_viewers,
             approved_viewers,
         }
+    }
+
+    /// Approved viewers, including ones inside their resume grace window.
+    #[must_use]
+    pub fn approved_viewer_count(&self) -> u32 {
+        let count = self
+            .viewers
+            .values()
+            .filter(|viewer| {
+                matches!(
+                    viewer.viewer_state,
+                    Some(ViewerState::Approved | ViewerState::Disconnected)
+                )
+            })
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    #[must_use]
+    pub const fn sharing_state(&self) -> SharingState {
+        self.sharing_state
+    }
+
+    #[must_use]
+    pub const fn lifecycle(&self) -> RoomLifecycle {
+        self.lifecycle
     }
 
     fn ensure_open(&self, now: OffsetDateTime) -> CommandResult {
@@ -359,6 +410,16 @@ impl RoomState {
         Ok(())
     }
 
+    /// Whether `credential` is this room's presenter secret. A pure check: no
+    /// session is created or touched.
+    #[must_use]
+    pub fn verify_presenter(&self, credential: &SecretString) -> bool {
+        self.secrets.verify(
+            &self.presenter_digest,
+            &self.secrets.presenter_digest(credential),
+        )
+    }
+
     fn authenticate_presenter(
         &mut self,
         credential: &SecretString,
@@ -366,10 +427,7 @@ impl RoomState {
         now: OffsetDateTime,
     ) -> CommandResult<AuthOutcome> {
         self.ensure_open(now)?;
-        if !self.secrets.verify(
-            &self.presenter_digest,
-            &self.secrets.presenter_digest(credential),
-        ) {
+        if !self.verify_presenter(credential) {
             return Err(DomainError::AuthenticationFailed);
         }
         if let Some(previous) = self.presenter.as_mut() {
@@ -387,6 +445,7 @@ impl RoomState {
             peer_id: peer_id.clone(),
             role: PeerRole::Presenter,
             display_name: None,
+            friend_code: None,
             viewer_state: None,
             joined_at: self.presenter.as_ref().map_or(now, |peer| peer.joined_at),
             connected: true,
@@ -401,7 +460,7 @@ impl RoomState {
             role: PeerRole::Presenter,
             resume_token,
             resume_expires_at,
-            snapshot: self.snapshot(),
+            snapshot: self.snapshot(now),
             resumed: false,
         })
     }
@@ -410,6 +469,7 @@ impl RoomState {
         &mut self,
         credential: &SecretString,
         display_name: Option<String>,
+        friend_code: Option<String>,
         session: SessionHandle,
         now: OffsetDateTime,
     ) -> CommandResult<AuthOutcome> {
@@ -420,18 +480,22 @@ impl RoomState {
         {
             return Err(DomainError::AuthenticationFailed);
         }
-        if self.access_policy == RoomAccessPolicy::Public {
-            let approved_count = self
-                .viewers
-                .values()
-                .filter(|viewer| {
-                    matches!(
-                        viewer.viewer_state,
-                        Some(ViewerState::Approved | ViewerState::Disconnected)
-                    )
-                })
-                .count();
-            if approved_count >= usize::from(self.maximum_viewers) {
+        if self.access_policy == RoomAccessPolicy::FriendsOnly {
+            // The transport verified the Ed25519 proof behind this code; the
+            // room only decides whether that code is on the allowlist.
+            let Some(code) = friend_code.as_deref() else {
+                return Err(DomainError::IdentityRequired);
+            };
+            if !self.allowed_friend_codes.contains(code) {
+                return Err(DomainError::AuthenticationFailed);
+            }
+        }
+        // Friends-only admits like Public once the identity is proven.
+        let auto_approved = self.access_policy != RoomAccessPolicy::ApprovalRequired;
+        if auto_approved {
+            if usize::try_from(self.approved_viewer_count()).unwrap_or(usize::MAX)
+                >= usize::from(self.maximum_viewers)
+            {
                 return Err(DomainError::RoomFull);
             }
         } else {
@@ -451,9 +515,11 @@ impl RoomState {
             peer_id: peer_id.clone(),
             role: PeerRole::Viewer,
             display_name: display_name.and_then(|name| sanitize_display_name(&name)),
-            viewer_state: Some(match self.access_policy {
-                RoomAccessPolicy::Public => ViewerState::Approved,
-                RoomAccessPolicy::ApprovalRequired => ViewerState::Pending,
+            friend_code,
+            viewer_state: Some(if auto_approved {
+                ViewerState::Approved
+            } else {
+                ViewerState::Pending
             }),
             joined_at: now,
             connected: true,
@@ -464,15 +530,14 @@ impl RoomState {
         };
         let viewer_snapshot = viewer.snapshot();
         self.viewers.insert(peer_id.clone(), viewer);
-        match self.access_policy {
-            RoomAccessPolicy::Public => self.send_snapshot_to_presenter(now),
-            RoomAccessPolicy::ApprovalRequired => {
-                self.send_presenter(ServerMessage::ViewerPending {
-                    protocol_version: PROTOCOL_VERSION,
-                    server_timestamp: format_time(now),
-                    viewer: viewer_snapshot,
-                });
-            }
+        if auto_approved {
+            self.send_snapshot_to_presenter(now);
+        } else {
+            self.send_presenter(ServerMessage::ViewerPending {
+                protocol_version: PROTOCOL_VERSION,
+                server_timestamp: format_time(now),
+                viewer: viewer_snapshot,
+            });
         }
         Ok(AuthOutcome {
             room_id: self.room_id.clone(),
@@ -480,7 +545,7 @@ impl RoomState {
             role: PeerRole::Viewer,
             resume_token,
             resume_expires_at,
-            snapshot: self.snapshot(),
+            snapshot: self.snapshot(now),
             resumed: false,
         })
     }
@@ -493,10 +558,15 @@ impl RoomState {
     ) -> CommandResult<AuthOutcome> {
         self.ensure_open(now)?;
         let digest = self.secrets.resume_digest(token);
+        // Match the token first and check the grace window second, so a valid
+        // token presented too late yields `SessionExpired` (a signal to fall
+        // back to fresh authentication) rather than a generic failure.
         let presenter_resume = if let Some(presenter) = self.presenter.as_mut()
-            && presenter.resume_expires_at >= now
             && self.secrets.verify(&presenter.resume_digest, &digest)
         {
+            if presenter.resume_expires_at < now {
+                return Err(DomainError::SessionExpired);
+            }
             presenter.connected = true;
             presenter.outbound = Some(session.outbound.clone());
             presenter.disconnected_at = None;
@@ -515,21 +585,21 @@ impl RoomState {
                 role: PeerRole::Presenter,
                 resume_token: token.clone(),
                 resume_expires_at,
-                snapshot: self.snapshot(),
+                snapshot: self.snapshot(now),
                 resumed: true,
             });
         }
         let viewer_id = self
             .viewers
             .iter()
-            .find(|(_, viewer)| {
-                viewer.resume_expires_at >= now
-                    && self.secrets.verify(&viewer.resume_digest, &digest)
-            })
+            .find(|(_, viewer)| self.secrets.verify(&viewer.resume_digest, &digest))
             .map(|(peer_id, _)| peer_id.clone());
         if let Some(viewer_id) = viewer_id
             && let Some(viewer) = self.viewers.get_mut(&viewer_id)
         {
+            if viewer.resume_expires_at < now {
+                return Err(DomainError::SessionExpired);
+            }
             viewer.connected = true;
             viewer.outbound = Some(session.outbound);
             viewer.disconnected_at = None;
@@ -549,7 +619,7 @@ impl RoomState {
                 role: PeerRole::Viewer,
                 resume_token: token.clone(),
                 resume_expires_at,
-                snapshot: self.snapshot(),
+                snapshot: self.snapshot(now),
                 resumed: true,
             });
         }
@@ -577,17 +647,9 @@ impl RoomState {
     ) -> CommandResult {
         self.ensure_open(now)?;
         self.ensure_presenter(source)?;
-        let approved_count = self
-            .viewers
-            .values()
-            .filter(|viewer| {
-                matches!(
-                    viewer.viewer_state,
-                    Some(ViewerState::Approved | ViewerState::Disconnected)
-                )
-            })
-            .count();
-        if approved_count >= usize::from(self.maximum_viewers) {
+        if usize::try_from(self.approved_viewer_count()).unwrap_or(usize::MAX)
+            >= usize::from(self.maximum_viewers)
+        {
             return Err(DomainError::RoomFull);
         }
         let viewer = self
@@ -878,7 +940,7 @@ impl RoomState {
     }
 
     fn send_snapshot_to_presenter(&mut self, now: OffsetDateTime) {
-        let snapshot = self.snapshot();
+        let snapshot = self.snapshot(now);
         self.send_presenter(ServerMessage::RoomSnapshot {
             protocol_version: PROTOCOL_VERSION,
             server_timestamp: format_time(now),
@@ -949,10 +1011,13 @@ impl RoomState {
         self.viewers.retain(|_, viewer| {
             let pending_expired = viewer.viewer_state == Some(ViewerState::Pending)
                 && now - viewer.joined_at >= self.pending_viewer_ttl;
+            // Keep a disconnected viewer around for one grace window past its
+            // resume expiry, so a late resume gets a precise `SessionExpired`
+            // instead of a generic authentication failure.
             let disconnected_expired = !viewer.connected
                 && viewer
                     .disconnected_at
-                    .is_some_and(|at| now - at >= self.viewer_resume_grace);
+                    .is_some_and(|at| now - at >= self.viewer_resume_grace * 2);
             !pending_expired && !disconnected_expired
         });
     }
@@ -992,6 +1057,7 @@ impl PeerSession {
             viewer_state: self.viewer_state,
             connected: self.connected,
             joined_at: format_time(self.joined_at),
+            friend_code: self.friend_code.clone(),
         }
     }
 }
@@ -1029,12 +1095,30 @@ impl SignalingAuthorizationService {
                 | RoutedSignal::IceCandidate { .. }
                 | RoutedSignal::IceRestart,
             ) => Ok(()),
-            (PeerRole::Viewer, RoutedSignal::Answer { .. } | RoutedSignal::IceCandidate { .. }) => {
-                Ok(())
-            }
+            (
+                PeerRole::Viewer,
+                RoutedSignal::Answer { .. }
+                | RoutedSignal::IceCandidate { .. }
+                | RoutedSignal::IceRestart,
+            ) => Ok(()),
             _ => Err(DomainError::AuthorizationDenied),
         }
     }
+}
+
+/// A change of observable room state, emitted by the room actor for listeners
+/// outside the room (such as friend presence). The registry stays unaware of
+/// who listens; the server wires the receiving end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomEvent {
+    /// The approved viewer count or sharing state changed.
+    Updated {
+        room_id: String,
+        approved_viewers: u32,
+        sharing_state: SharingState,
+    },
+    /// The room closed or expired.
+    Closed { room_id: String },
 }
 
 type RegistryMap = Arc<RwLock<HashMap<String, mpsc::Sender<RoomCommand>>>>;
@@ -1045,6 +1129,7 @@ pub struct RoomRegistry {
     secrets: Arc<SecretDigestService>,
     clock: Arc<dyn Clock>,
     config: RoomActorConfig,
+    events: Option<mpsc::Sender<RoomEvent>>,
 }
 
 impl std::fmt::Debug for RoomRegistry {
@@ -1073,7 +1158,16 @@ impl RoomRegistry {
             secrets,
             clock,
             config,
+            events: None,
         }
+    }
+
+    /// Emits [`RoomEvent`]s from every room actor onto `events`. Events are
+    /// best-effort: a full or dropped receiver never blocks a room.
+    #[must_use]
+    pub fn with_events(mut self, events: mpsc::Sender<RoomEvent>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     pub async fn create_room(
@@ -1081,6 +1175,7 @@ impl RoomRegistry {
         maximum_viewers: u8,
         ttl: Duration,
         access_policy: RoomAccessPolicy,
+        allowed_friend_codes: Vec<String>,
     ) -> CommandResult<CreateRoomOutcome> {
         if maximum_viewers == 0 || maximum_viewers > self.config.maximum_viewers_hard_limit {
             return Err(DomainError::InvalidCapacity);
@@ -1094,6 +1189,7 @@ impl RoomRegistry {
             generated.room_id.clone(),
             maximum_viewers,
             access_policy,
+            allowed_friend_codes.into_iter().collect(),
             now,
             expires_at,
             presenter_digest,
@@ -1109,8 +1205,9 @@ impl RoomRegistry {
         let rooms = Arc::clone(&self.rooms);
         let room_id = generated.room_id.clone();
         let clock = Arc::clone(&self.clock);
+        let events = self.events.clone();
         tokio::spawn(async move {
-            run_room_actor(state, receiver, clock).await;
+            run_room_actor(state, receiver, clock, events).await;
             rooms.write().await.remove(&room_id);
             debug!(room_id = %room_id, "room actor removed from registry");
         });
@@ -1167,14 +1264,17 @@ async fn run_room_actor(
     mut room: RoomState,
     mut commands: mpsc::Receiver<RoomCommand>,
     clock: Arc<dyn Clock>,
+    events: Option<mpsc::Sender<RoomEvent>>,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut announced = (room.approved_viewer_count(), room.sharing_state());
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 room.expire_stale(clock.now());
                 if room.lifecycle != RoomLifecycle::Open { break; }
+                emit_room_update(&room, &events, &mut announced);
             }
             command = commands.recv() => {
                 let Some(command) = command else { break; };
@@ -1183,8 +1283,8 @@ async fn run_room_actor(
                     RoomCommand::AuthenticatePresenter { credential, session, reply } => {
                         let _ = reply.send(room.authenticate_presenter(&credential, session, now));
                     }
-                    RoomCommand::AuthenticateViewer { credential, display_name, session, reply } => {
-                        let _ = reply.send(room.authenticate_viewer(&credential, display_name, session, now));
+                    RoomCommand::AuthenticateViewer { credential, display_name, friend_code, session, reply } => {
+                        let _ = reply.send(room.authenticate_viewer(&credential, display_name, friend_code, session, now));
                     }
                     RoomCommand::Resume { resume_token, session, reply } => {
                         let _ = reply.send(room.resume(&resume_token, session, now));
@@ -1216,13 +1316,42 @@ async fn run_room_actor(
                         let result = room.ensure_presenter(&source_peer_id).map(|()| room.close(now, false));
                         let _ = reply.send(result);
                     }
-                    RoomCommand::Snapshot { reply } => { let _ = reply.send(room.snapshot()); }
+                    RoomCommand::Snapshot { reply } => { let _ = reply.send(room.snapshot(now)); }
+                    RoomCommand::VerifyPresenter { credential, reply } => {
+                        let _ = reply.send(room.verify_presenter(&credential));
+                    }
                     RoomCommand::Shutdown => room.close(now, false),
                 }
                 if room.lifecycle != RoomLifecycle::Open { break; }
+                emit_room_update(&room, &events, &mut announced);
             }
         }
     }
+    if let Some(events) = events {
+        let _ = events.try_send(RoomEvent::Closed {
+            room_id: room.room_id.clone(),
+        });
+    }
+}
+
+/// Sends an [`RoomEvent::Updated`] when the observable room state moved past
+/// what was last announced.
+fn emit_room_update(
+    room: &RoomState,
+    events: &Option<mpsc::Sender<RoomEvent>>,
+    announced: &mut (u32, SharingState),
+) {
+    let Some(events) = events else { return };
+    let current = (room.approved_viewer_count(), room.sharing_state());
+    if current == *announced {
+        return;
+    }
+    *announced = current;
+    let _ = events.try_send(RoomEvent::Updated {
+        room_id: room.room_id.clone(),
+        approved_viewers: current.0,
+        sharing_state: current.1,
+    });
 }
 
 #[must_use]
@@ -1236,12 +1365,6 @@ pub fn sanitize_display_name(value: &str) -> Option<String> {
         .join(" ");
     let truncated = normalized.chars().take(48).collect::<String>();
     (!truncated.is_empty()).then_some(truncated)
-}
-
-fn format_time(value: OffsetDateTime) -> String {
-    value
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| value.unix_timestamp().to_string())
 }
 
 #[cfg(test)]
@@ -1280,6 +1403,7 @@ mod tests {
             generated.room_id,
             4,
             access_policy,
+            HashSet::new(),
             now,
             now + Duration::hours(2),
             secrets.presenter_digest(&presenter),
@@ -1294,6 +1418,77 @@ mod tests {
     fn session() -> (SessionHandle, mpsc::Receiver<ServerMessage>) {
         let (outbound, receiver) = mpsc::channel(8);
         (SessionHandle { outbound }, receiver)
+    }
+
+    #[test]
+    fn friends_only_rooms_admit_allowlisted_codes_and_reject_others() {
+        let (mut room, _, _, viewer_secret, now) = fixture_with_policy(RoomAccessPolicy::Public);
+        room.access_policy = RoomAccessPolicy::FriendsOnly;
+        room.allowed_friend_codes = HashSet::from(["clr-AAAA-AAAA".to_owned()]);
+
+        // No proven identity: the transport must run the identity challenge.
+        assert_eq!(
+            room.authenticate_viewer(&viewer_secret, None, None, session().0, now)
+                .expect_err("identity required"),
+            DomainError::IdentityRequired
+        );
+        // A code off the allowlist is refused outright.
+        assert_eq!(
+            room.authenticate_viewer(
+                &viewer_secret,
+                None,
+                Some("clr-BBBB-BBBB".into()),
+                session().0,
+                now,
+            )
+            .expect_err("not allowlisted"),
+            DomainError::AuthenticationFailed
+        );
+        // An allowlisted code joins approved immediately, like Public.
+        let admitted = room
+            .authenticate_viewer(
+                &viewer_secret,
+                Some("Friend".into()),
+                Some("clr-AAAA-AAAA".into()),
+                session().0,
+                now,
+            )
+            .expect("allowlisted friend");
+        let snapshot = room.snapshot(now);
+        assert!(snapshot.pending_viewers.is_empty());
+        assert_eq!(
+            snapshot
+                .approved_viewers
+                .iter()
+                .find(|peer| peer.peer_id == admitted.peer_id)
+                .and_then(|peer| peer.friend_code.as_deref()),
+            Some("clr-AAAA-AAAA")
+        );
+    }
+
+    #[test]
+    fn late_resume_with_a_valid_token_reports_session_expired() {
+        let (mut room, _, presenter_secret, viewer_secret, now) =
+            fixture_with_policy(RoomAccessPolicy::Public);
+        room.authenticate_presenter(&presenter_secret, session().0, now)
+            .expect("presenter");
+        let viewer = room
+            .authenticate_viewer(&viewer_secret, None, None, session().0, now)
+            .expect("viewer");
+        room.disconnect(&viewer.peer_id, now);
+
+        let late = now + RoomActorConfig::default().viewer_resume_grace + Duration::seconds(1);
+        assert_eq!(
+            room.resume(&viewer.resume_token, session().0, late)
+                .expect_err("expired token"),
+            DomainError::SessionExpired
+        );
+        // A token that never matched anything stays a plain failure.
+        assert_eq!(
+            room.resume(&SecretString::from("wrong-token".to_owned()), session().0, now)
+                .expect_err("wrong token"),
+            DomainError::AuthenticationFailed
+        );
     }
 
     #[test]
@@ -1316,13 +1511,13 @@ mod tests {
             .authenticate_presenter(&presenter_secret, session().0, now)
             .expect("presenter auth");
         let viewer = room
-            .authenticate_viewer(&viewer_secret, Some(" Viewer ".into()), session().0, now)
+            .authenticate_viewer(&viewer_secret, Some(" Viewer ".into()), None, session().0, now)
             .expect("viewer auth");
-        assert_eq!(room.snapshot().pending_viewers.len(), 1);
+        assert_eq!(room.snapshot(now).pending_viewers.len(), 1);
         room.approve(&presenter.peer_id, &viewer.peer_id, "approve".into(), now)
             .expect("approval");
-        assert_eq!(room.snapshot().pending_viewers.len(), 0);
-        assert_eq!(room.snapshot().approved_viewers.len(), 1);
+        assert_eq!(room.snapshot(now).pending_viewers.len(), 0);
+        assert_eq!(room.snapshot(now).approved_viewers.len(), 1);
     }
 
     #[test]
@@ -1333,6 +1528,7 @@ mod tests {
                 .authenticate_viewer(
                     &viewer_secret,
                     Some(format!("Viewer {index}")),
+                    None,
                     session().0,
                     now,
                 )
@@ -1347,10 +1543,10 @@ mod tests {
                 Some(ViewerState::Approved)
             );
         }
-        assert!(room.snapshot().pending_viewers.is_empty());
-        assert_eq!(room.snapshot().approved_viewers.len(), 4);
+        assert!(room.snapshot(now).pending_viewers.is_empty());
+        assert_eq!(room.snapshot(now).approved_viewers.len(), 4);
         assert_eq!(
-            room.authenticate_viewer(&viewer_secret, None, session().0, now)
+            room.authenticate_viewer(&viewer_secret, None, None, session().0, now)
                 .expect_err("fifth viewer is rejected"),
             DomainError::RoomFull
         );
@@ -1365,7 +1561,7 @@ mod tests {
             .expect("presenter");
         let (viewer_session, mut viewer_messages) = session();
         let viewer = room
-            .authenticate_viewer(&viewer_secret, None, viewer_session, now)
+            .authenticate_viewer(&viewer_secret, None, None, viewer_session, now)
             .expect("anonymous viewer");
 
         room.update_viewer_display_name(
@@ -1377,7 +1573,7 @@ mod tests {
         .expect("rename");
 
         assert_eq!(
-            room.snapshot().approved_viewers[0].display_name.as_deref(),
+            room.snapshot(now).approved_viewers[0].display_name.as_deref(),
             Some("Jamie Viewer")
         );
         assert!(matches!(
@@ -1407,6 +1603,7 @@ mod tests {
                 .authenticate_viewer(
                     &viewer_secret,
                     Some(format!("Viewer {index}")),
+                    None,
                     session().0,
                     now,
                 )
@@ -1421,9 +1618,9 @@ mod tests {
         }
         room.update_capacity(&presenter.peer_id, 1, "capacity".into(), now)
             .expect("capacity");
-        assert_eq!(room.snapshot().approved_viewers.len(), 2);
+        assert_eq!(room.snapshot(now).approved_viewers.len(), 2);
         let third = room
-            .authenticate_viewer(&viewer_secret, None, session().0, now)
+            .authenticate_viewer(&viewer_secret, None, None, session().0, now)
             .expect("pending allowed");
         assert_eq!(
             room.approve(&presenter.peer_id, &third.peer_id, "third".into(), now),
@@ -1439,10 +1636,10 @@ mod tests {
             .authenticate_presenter(&presenter_secret, session().0, now)
             .expect("presenter");
         let viewer = room
-            .authenticate_viewer(&viewer_secret, None, session().0, now)
+            .authenticate_viewer(&viewer_secret, None, None, session().0, now)
             .expect("viewer");
 
-        assert_eq!(room.snapshot().sharing_state, SharingState::Idle);
+        assert_eq!(room.snapshot(now).sharing_state, SharingState::Idle);
         assert_eq!(
             room.update_sharing_state(
                 &viewer.peer_id,
@@ -1459,7 +1656,7 @@ mod tests {
             now,
         )
         .expect("pause");
-        assert_eq!(room.snapshot().sharing_state, SharingState::Paused);
+        assert_eq!(room.snapshot(now).sharing_state, SharingState::Paused);
     }
 
     #[test]
@@ -1483,6 +1680,14 @@ mod tests {
             ),
             Err(DomainError::AuthorizationDenied)
         );
+        assert_eq!(
+            SignalingAuthorizationService::authorize(
+                PeerRole::Viewer,
+                PeerRole::Presenter,
+                &RoutedSignal::IceRestart
+            ),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1503,7 +1708,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new(now));
         let registry = RoomRegistry::with_clock(secrets, RoomActorConfig::default(), clock);
         let created = registry
-            .create_room(1, Duration::hours(1), RoomAccessPolicy::Public)
+            .create_room(1, Duration::hours(1), RoomAccessPolicy::Public, Vec::new())
             .await
             .expect("create");
         let (reply_tx, reply_rx) = oneshot::channel();

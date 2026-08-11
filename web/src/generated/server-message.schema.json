@@ -60,6 +60,38 @@
     {
       "type": "object",
       "properties": {
+        "nonce": {
+          "description": "Nonce the viewer must sign with its Ed25519 key (via\n`auth:identity`) to prove its friend code for a friends-only room.",
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "serverTimestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth:identity-challenge"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "serverTimestamp",
+        "nonce"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "code": {
           "$ref": "#/$defs/ErrorCode"
         },
@@ -832,6 +864,13 @@
             "null"
           ]
         },
+        "friendCode": {
+          "description": "The peer's friend code, present when the peer proved its identity\nduring authentication (friends-only rooms).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "joinedAt": {
           "type": "string"
         },
@@ -863,7 +902,8 @@
       "type": "string",
       "enum": [
         "public",
-        "approvalRequired"
+        "approvalRequired",
+        "friendsOnly"
       ]
     },
     "RoomLifecycle": {
@@ -888,6 +928,12 @@
         },
         "expiresAt": {
           "type": "string"
+        },
+        "expiresInSeconds": {
+          "description": "Seconds until the room expires, measured on the server clock when the\nsnapshot was taken, so clients can render remaining time without\ntrusting their own clock.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "lifecycle": {
           "$ref": "#/$defs/RoomLifecycle"
@@ -921,6 +967,7 @@
         "accessPolicy",
         "maximumViewers",
         "expiresAt",
+        "expiresInSeconds",
         "presenterConnected",
         "pendingViewers",
         "approvedViewers"

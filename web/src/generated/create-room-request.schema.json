@@ -13,6 +13,16 @@
         }
       ]
     },
+    "allowedFriendCodes": {
+      "description": "Friend codes permitted to join. Required (and non-empty) when\n`access_policy` is `FriendsOnly`; ignored otherwise.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
     "expiresInSeconds": {
       "type": [
         "integer",
@@ -36,7 +46,8 @@
       "type": "string",
       "enum": [
         "public",
-        "approvalRequired"
+        "approvalRequired",
+        "friendsOnly"
       ]
     }
   }

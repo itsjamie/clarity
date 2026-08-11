@@ -1,10 +1,13 @@
 use std::{collections::HashSet, net::SocketAddr};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use clarity_core::{RoomActorConfig, TurnConfig};
 use clarity_protocol::{
     ClientMessage, CreateRoomRequest, CreateRoomResponse, ErrorCode, PROTOCOL_VERSION,
     RoomAccessPolicy, ServerMessage, SharingState,
 };
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use clarity_server::{AppConfig, AppState, build_router, config::Environment};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, StatusCode};
@@ -115,6 +118,7 @@ async fn create_room_with_policy(
             maximum_viewers: Some(maximum_viewers),
             expires_in_seconds: Some(3_600),
             access_policy,
+            allowed_friend_codes: None,
         })
         .send()
         .await
@@ -122,6 +126,95 @@ async fn create_room_with_policy(
     assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(response.headers()["cache-control"], "no-store");
     response.json().await.expect("room response")
+}
+
+async fn create_friends_room(server: &TestServer, allowed: Vec<String>) -> CreateRoomResponse {
+    let response = Client::new()
+        .post(format!("{}/api/v1/rooms", server.base_url))
+        .header("origin", &server.base_url)
+        .json(&CreateRoomRequest {
+            maximum_viewers: Some(4),
+            expires_in_seconds: Some(3_600),
+            access_policy: Some(RoomAccessPolicy::FriendsOnly),
+            allowed_friend_codes: Some(allowed),
+        })
+        .send()
+        .await
+        .expect("create friends room request");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response.json().await.expect("room response")
+}
+
+/// A throwaway signing identity for friends-only authentication.
+struct Identity {
+    key_pair: Ed25519KeyPair,
+}
+
+impl Identity {
+    fn new() -> Self {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+        Self {
+            key_pair: Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("from pkcs8"),
+        }
+    }
+
+    fn public_key_b64(&self) -> String {
+        BASE64.encode(self.key_pair.public_key().as_ref())
+    }
+
+    fn code(&self) -> String {
+        clarity_protocol::code::encode(self.key_pair.public_key().as_ref())
+    }
+
+    fn sign_b64(&self, message: &str) -> String {
+        BASE64.encode(self.key_pair.sign(message.as_bytes()).as_ref())
+    }
+}
+
+/// Runs the viewer authentication for a friends-only room through the
+/// identity challenge with `identity`, returning the final auth reply.
+async fn join_friends_room(
+    server: &TestServer,
+    room: &CreateRoomResponse,
+    identity: &Identity,
+    name: &str,
+) -> (ClientWebSocket, ServerMessage) {
+    let invitation = Url::parse(&room.viewer_url).expect("viewer URL");
+    let mut socket = connect_websocket(server).await;
+    send_client(
+        &mut socket,
+        ClientMessage::AuthViewer {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: format!("friends-auth-{name}"),
+            room_id: room.room_id.clone(),
+            viewer_secret: invitation.fragment().expect("fragment").into(),
+            display_name: Some(name.into()),
+        },
+    )
+    .await;
+    let ServerMessage::AuthIdentityChallenge { nonce, .. } = next_server(&mut socket).await else {
+        panic!("expected an identity challenge for a friends-only room");
+    };
+    // The signature is bound to the room-auth context and the server's host,
+    // exactly as the real clients sign.
+    let payload = clarity_protocol::identity_challenge_payload(
+        clarity_protocol::IDENTITY_CONTEXT_ROOM_AUTH,
+        server.base_url.trim_start_matches("http://"),
+        &nonce,
+    );
+    send_client(
+        &mut socket,
+        ClientMessage::AuthIdentity {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: format!("friends-identity-{name}"),
+            public_key: identity.public_key_b64(),
+            signature: identity.sign_b64(&payload),
+        },
+    )
+    .await;
+    let reply = next_server(&mut socket).await;
+    (socket, reply)
 }
 
 async fn connect_websocket(server: &TestServer) -> ClientWebSocket {
@@ -276,6 +369,7 @@ async fn health_readiness_room_creation_and_origin_policy() {
             maximum_viewers: Some(4),
             expires_in_seconds: None,
             access_policy: None,
+            allowed_friend_codes: None,
         })
         .send()
         .await
@@ -305,6 +399,7 @@ async fn public_rooms_default_to_ten_viewers() {
             maximum_viewers: None,
             expires_in_seconds: Some(3_600),
             access_policy: Some(RoomAccessPolicy::Public),
+            allowed_friend_codes: None,
         })
         .send()
         .await
@@ -699,4 +794,122 @@ async fn malformed_json_unsupported_versions_and_authentication_timeout_are_stru
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn friends_only_rooms_admit_allowlisted_identities_and_reject_strangers() {
+    let server = spawn_server().await;
+    let friend = Identity::new();
+    let stranger = Identity::new();
+    let room = create_friends_room(&server, vec![friend.code()]).await;
+    assert_eq!(room.access_policy, RoomAccessPolicy::FriendsOnly);
+    let invitation = Url::parse(&room.viewer_url).expect("viewer URL");
+    assert_eq!(invitation.query(), Some("access=friends"));
+
+    let (mut presenter, _, _) = authenticate_presenter(&server, &room).await;
+
+    // The allowlisted friend proves its key and joins approved immediately.
+    let (_friend_socket, admitted) = join_friends_room(&server, &room, &friend, "Friend").await;
+    let ServerMessage::AuthSucceeded { snapshot, peer_id, .. } = admitted else {
+        panic!("allowlisted friend should be admitted, got {admitted:?}");
+    };
+    assert!(snapshot.pending_viewers.is_empty());
+    assert_eq!(
+        snapshot
+            .approved_viewers
+            .iter()
+            .find(|viewer| viewer.peer_id == peer_id)
+            .and_then(|viewer| viewer.friend_code.clone()),
+        Some(friend.code())
+    );
+
+    // A proven identity that is not on the allowlist is rejected.
+    let (_stranger_socket, rejected) =
+        join_friends_room(&server, &room, &stranger, "Stranger").await;
+    assert!(matches!(
+        rejected,
+        ServerMessage::AuthFailed {
+            code: ErrorCode::AuthenticationFailed,
+            ..
+        }
+    ));
+
+    // The presenter's snapshot labels the admitted friend by code.
+    let labelled = wait_for(&mut presenter, |message| {
+        matches!(message, ServerMessage::RoomSnapshot { snapshot, .. }
+            if snapshot.approved_viewers.iter().any(|viewer| viewer.friend_code.as_deref() == Some(&friend.code())))
+    })
+    .await;
+    assert!(matches!(labelled, ServerMessage::RoomSnapshot { .. }));
+}
+
+#[tokio::test]
+async fn friends_only_rooms_require_a_valid_allowlist() {
+    let server = spawn_server().await;
+    // `0` and `1` are outside the base32 alphabet, so this code can't parse.
+    for allowed in [None, Some(vec![]), Some(vec!["clr-0000-1111".to_owned()])] {
+        let response = Client::new()
+            .post(format!("{}/api/v1/rooms", server.base_url))
+            .header("origin", &server.base_url)
+            .json(&CreateRoomRequest {
+                maximum_viewers: Some(4),
+                expires_in_seconds: Some(3_600),
+                access_policy: Some(RoomAccessPolicy::FriendsOnly),
+                allowed_friend_codes: allowed,
+            })
+            .send()
+            .await
+            .expect("create room request");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn late_resume_reports_session_expired_and_fresh_authentication_still_works() {
+    let server = spawn_server().await;
+    let room = create_public_room(&server, 4).await;
+    let (_presenter, _, _) = authenticate_presenter(&server, &room).await;
+
+    let invitation = Url::parse(&room.viewer_url).expect("viewer URL");
+    let mut viewer = connect_websocket(&server).await;
+    send_client(
+        &mut viewer,
+        ClientMessage::AuthViewer {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "expiring-viewer".into(),
+            room_id: room.room_id.clone(),
+            viewer_secret: invitation.fragment().expect("fragment").into(),
+            display_name: Some("Expiring".into()),
+        },
+    )
+    .await;
+    let ServerMessage::AuthSucceeded { resume_token, .. } = next_server(&mut viewer).await else {
+        panic!("viewer auth should succeed");
+    };
+
+    // Disconnect and outstay the 500 ms resume grace (the session itself is
+    // retained a little longer, so the late resume is precisely identified).
+    viewer.close(None).await.expect("close viewer socket");
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let mut late = connect_websocket(&server).await;
+    send_client(
+        &mut late,
+        ClientMessage::SessionResume {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "late-resume".into(),
+            room_id: room.room_id.clone(),
+            resume_token,
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_server(&mut late).await,
+        ServerMessage::AuthFailed {
+            code: ErrorCode::SessionExpired,
+            ..
+        }
+    ));
+
+    // Falling back to fresh viewer authentication still gets into the room.
+    let (_socket, _peer) = authenticate_viewer(&server, &room, "Fresh").await;
 }

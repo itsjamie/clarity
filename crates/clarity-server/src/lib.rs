@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod config;
+pub mod presence_ws;
 pub mod rate_limit;
 pub mod ws;
 

@@ -5,9 +5,10 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use clarity_protocol::{
-    ApiError, ClientMessage, CreateRoomRequest, CreateRoomResponse, ErrorCode, IceConfiguration,
-    IceServer, PeerRole, PeerSnapshot, ProtocolInfo, RoomAccessPolicy, RoomLifecycle, RoomSnapshot,
-    ServerMessage, SharingState, ViewerState,
+    ApiError, ChatMessage, ClientMessage, CreateRoomRequest, CreateRoomResponse, ErrorCode,
+    FriendPresence, HostedRoom, IceConfiguration, IceServer, PeerRole, PeerSnapshot,
+    PresenceClientMessage, PresenceServerMessage, ProtocolInfo, RoomAccessPolicy, RoomLifecycle,
+    RoomSnapshot, ServerMessage, SharingState, ViewerState,
 };
 use schemars::schema_for;
 use ts_rs::TS;
@@ -50,8 +51,13 @@ fn export_protocol() -> Result<()> {
         IceConfiguration::decl(),
         PeerSnapshot::decl(),
         RoomSnapshot::decl(),
+        ChatMessage::decl(),
+        HostedRoom::decl(),
+        FriendPresence::decl(),
         ClientMessage::decl(),
         ServerMessage::decl(),
+        PresenceClientMessage::decl(),
+        PresenceServerMessage::decl(),
     ]
     .map(|declaration| format!("export {declaration}"))
     .join("\n\n");

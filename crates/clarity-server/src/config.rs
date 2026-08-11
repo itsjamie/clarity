@@ -183,6 +183,28 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Every `host[:port]` this server answers to for identity challenges:
+    /// the public base URL's authority plus each allowed origin's. Clients
+    /// bind their challenge signatures to the host they dialed (see
+    /// [`clarity_protocol::identity_challenge_payload`]), so a signature
+    /// bound to any other server's host never verifies here.
+    #[must_use]
+    pub fn identity_hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
+        let mut push = |host: Option<String>| {
+            if let Some(host) = host
+                && !hosts.contains(&host)
+            {
+                hosts.push(host);
+            }
+        };
+        push(url_authority(&self.public_base_url));
+        for origin in &self.allowed_origins {
+            push(Url::parse(origin).ok().as_ref().and_then(url_authority));
+        }
+        hosts
+    }
+
     fn validate(&self) -> Result<()> {
         if self.allowed_origins.is_empty() {
             bail!("ALLOWED_ORIGINS must include at least one exact origin");
@@ -204,6 +226,15 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+/// The URL's `host[:port]`, with default ports omitted — the same
+/// canonicalization clients apply to the URL they dialed.
+fn url_authority(url: &Url) -> Option<String> {
+    url.host_str().map(|host| match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
 }
 
 fn env_string(name: &str, default: &str) -> String {

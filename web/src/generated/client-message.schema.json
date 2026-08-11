@@ -79,6 +79,39 @@
           "maximum": 65535,
           "minimum": 0
         },
+        "publicKey": {
+          "description": "Base64 of the 32-byte Ed25519 public key. The server derives the\nfriend code from it, so the client never asserts its own code.",
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "signature": {
+          "description": "Base64 Ed25519 signature over the UTF-8 bytes of\n[`identity_challenge_payload`] with the\n[`IDENTITY_CONTEXT_ROOM_AUTH`] context.",
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "auth:identity"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion",
+        "requestId",
+        "publicKey",
+        "signature"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
         "requestId": {
           "type": "string"
         },

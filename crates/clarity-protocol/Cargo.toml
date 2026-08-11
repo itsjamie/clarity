@@ -6,8 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+data-encoding.workspace = true
 schemars.workspace = true
 serde.workspace = true
+sha2.workspace = true
 ts-rs.workspace = true
 
 [dev-dependencies]

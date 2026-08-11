@@ -9,9 +9,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use clarity_core::{
-    AuthOutcome, DomainError, RoomCommand, RoutedSignal, SessionHandle, secret_as_str,
+    AuthOutcome, DomainError, RoomCommand, RoutedSignal, SessionHandle, new_challenge,
+    secret_as_str, verify_identity_for_hosts,
 };
-use clarity_protocol::{ClientMessage, ErrorCode, PROTOCOL_VERSION, PeerRole, ServerMessage};
+use clarity_protocol::{
+    ClientMessage, ErrorCode, IDENTITY_CONTEXT_ROOM_AUTH, PROTOCOL_VERSION, PeerRole,
+    ServerMessage,
+};
 use futures_util::{SinkExt, StreamExt};
 use secrecy::SecretString;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -198,6 +202,10 @@ fn authentication_failure(error: &DomainError) -> (ErrorCode, &'static str) {
             ErrorCode::PendingViewerLimitReached,
             "The room has too many pending viewers.",
         ),
+        DomainError::SessionExpired => (
+            ErrorCode::SessionExpired,
+            "The resumable session has expired; authenticate again.",
+        ),
         _ => (ErrorCode::AuthenticationFailed, "Authentication failed."),
     }
 }
@@ -249,26 +257,22 @@ async fn authenticate(
     let session_handle = SessionHandle {
         outbound: outbound.clone(),
     };
-    let (room_id, request_id, reply) = match message {
+    let (room_id, request_id, outcome) = match message {
         ClientMessage::AuthPresenter {
             request_id,
             room_id,
             presenter_secret,
             ..
         } => {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            state
-                .registry
-                .dispatch(
-                    &room_id,
-                    RoomCommand::AuthenticatePresenter {
-                        credential: SecretString::from(presenter_secret),
-                        session: session_handle,
-                        reply: reply_tx,
-                    },
-                )
-                .await?;
-            (room_id, request_id, reply_rx)
+            let outcome = auth_command(state, &room_id, |reply| {
+                RoomCommand::AuthenticatePresenter {
+                    credential: SecretString::from(presenter_secret),
+                    session: session_handle,
+                    reply,
+                }
+            })
+            .await;
+            (room_id, request_id, outcome)
         }
         ClientMessage::AuthViewer {
             request_id,
@@ -277,20 +281,18 @@ async fn authenticate(
             display_name,
             ..
         } => {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            state
-                .registry
-                .dispatch(
-                    &room_id,
-                    RoomCommand::AuthenticateViewer {
-                        credential: SecretString::from(viewer_secret),
-                        display_name,
-                        session: session_handle,
-                        reply: reply_tx,
-                    },
-                )
-                .await?;
-            (room_id, request_id, reply_rx)
+            let outcome = authenticate_viewer(
+                reader,
+                outbound,
+                state,
+                &room_id,
+                viewer_secret,
+                display_name,
+                &request_id,
+                session_handle,
+            )
+            .await;
+            (room_id, request_id, outcome)
         }
         ClientMessage::SessionResume {
             request_id,
@@ -298,19 +300,13 @@ async fn authenticate(
             resume_token,
             ..
         } => {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            state
-                .registry
-                .dispatch(
-                    &room_id,
-                    RoomCommand::Resume {
-                        resume_token: SecretString::from(resume_token),
-                        session: session_handle,
-                        reply: reply_tx,
-                    },
-                )
-                .await?;
-            (room_id, request_id, reply_rx)
+            let outcome = auth_command(state, &room_id, |reply| RoomCommand::Resume {
+                resume_token: SecretString::from(resume_token),
+                session: session_handle,
+                reply,
+            })
+            .await;
+            (room_id, request_id, outcome)
         }
         _ => {
             send_auth_failed(
@@ -322,13 +318,97 @@ async fn authenticate(
             return Err(DomainError::AuthenticationFailed);
         }
     };
-    let outcome = reply.await.map_err(|_| DomainError::Unavailable)??;
+    let outcome = outcome?;
     send_auth_success(outbound, state, &request_id, &outcome)?;
     Ok(AuthenticatedSession {
         room_id,
         peer_id: outcome.peer_id,
         role: outcome.role,
     })
+}
+
+/// Authenticates a viewer, running the identity challenge when the room is
+/// friends-only: the server sends `auth:identity-challenge`, the client
+/// proves its Ed25519 key with `auth:identity`, and the derived friend code
+/// is handed to the room for its allowlist decision.
+#[allow(clippy::too_many_arguments)]
+async fn authenticate_viewer(
+    reader: &mut futures_util::stream::SplitStream<WebSocket>,
+    outbound: &mpsc::Sender<ServerMessage>,
+    state: &AppState,
+    room_id: &str,
+    viewer_secret: String,
+    display_name: Option<String>,
+    request_id: &str,
+    session: SessionHandle,
+) -> Result<AuthOutcome, DomainError> {
+    let credential = SecretString::from(viewer_secret);
+    let first = auth_command(state, room_id, |reply| RoomCommand::AuthenticateViewer {
+        credential: credential.clone(),
+        display_name: display_name.clone(),
+        friend_code: None,
+        session: session.clone(),
+        reply,
+    })
+    .await;
+    if !matches!(first, Err(DomainError::IdentityRequired)) {
+        return first;
+    }
+    let nonce = new_challenge();
+    if !try_send(
+        outbound,
+        ServerMessage::AuthIdentityChallenge {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.to_owned(),
+            server_timestamp: now_string(),
+            nonce: nonce.clone(),
+        },
+    ) {
+        return Err(DomainError::Unavailable);
+    }
+    let Ok(Some(answer)) = parse_incoming(
+        reader.next().await,
+        state.config.websocket_max_message_bytes,
+    ) else {
+        return Err(DomainError::AuthenticationFailed);
+    };
+    let ClientMessage::AuthIdentity {
+        protocol_version,
+        public_key,
+        signature,
+        ..
+    } = answer
+    else {
+        return Err(DomainError::AuthenticationFailed);
+    };
+    if protocol_version != PROTOCOL_VERSION {
+        return Err(DomainError::AuthenticationFailed);
+    }
+    let friend_code = verify_identity_for_hosts(
+        &public_key,
+        &signature,
+        IDENTITY_CONTEXT_ROOM_AUTH,
+        &state.config.identity_hosts(),
+        &nonce,
+    )
+    .map_err(|_| DomainError::AuthenticationFailed)?;
+    auth_command(state, room_id, |reply| RoomCommand::AuthenticateViewer {
+        credential,
+        display_name,
+        friend_code: Some(friend_code),
+        session,
+        reply,
+    })
+    .await
+}
+
+async fn auth_command<F>(state: &AppState, room_id: &str, command: F) -> Result<AuthOutcome, DomainError>
+where
+    F: FnOnce(oneshot::Sender<Result<AuthOutcome, DomainError>>) -> RoomCommand,
+{
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state.registry.dispatch(room_id, command(reply_tx)).await?;
+    reply_rx.await.map_err(|_| DomainError::Unavailable)?
 }
 
 fn send_auth_success(
@@ -573,6 +653,7 @@ async fn handle_authenticated_message(
         }
         ClientMessage::AuthPresenter { .. }
         | ClientMessage::AuthViewer { .. }
+        | ClientMessage::AuthIdentity { .. }
         | ClientMessage::SessionResume { .. }
         | ClientMessage::HeartbeatPong { .. } => Err(DomainError::AuthorizationDenied),
     };
