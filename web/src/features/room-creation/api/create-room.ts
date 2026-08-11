@@ -4,6 +4,8 @@ export interface CreateRoomInput {
   maximumViewers: number;
   expiresInSeconds: number;
   accessPolicy: RoomAccessPolicy;
+  /** Required (non-empty) when `accessPolicy` is `friendsOnly`. */
+  allowedFriendCodes?: string[];
 }
 
 export async function createRoom(input: CreateRoomInput): Promise<CreateRoomResponse> {

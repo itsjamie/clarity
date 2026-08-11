@@ -1,111 +1,99 @@
-import { AppHeader } from '@/components/layout/app-header';
-import { CreateRoomForm } from '@/features/room-creation/components/create-room-form';
+import { useOutletContext } from 'react-router-dom';
+
+import { useSessionState } from '@/hooks/use-session-state';
+import {
+  contactsStore,
+  presenceStore,
+} from '@/lib/presence/presence-service';
+import {
+  friendRows,
+  initials,
+  liveRooms,
+  type FriendRow,
+} from '@/features/shell/lib/friend-rows';
+import type { ShellOutletContext } from './shell-route';
 
 export function HomeRoute() {
+  const { openCreateRoom } = useOutletContext<ShellOutletContext>();
+  const contacts = useSessionState(contactsStore);
+  const presence = useSessionState(presenceStore);
+  const rooms = liveRooms(friendRows(contacts.contacts, presence.friends));
+
   return (
-    <div className="app-shell home-shell">
-      <AppHeader assurance="Streams straight to your viewers" />
-      <main className="home-content">
-        <section className="home-main" aria-labelledby="home-title">
-          <div className="home-intro">
-            <p className="eyebrow">High-fidelity browser sharing</p>
-            <h1 id="home-title">Share the pixels<br />that matter.</h1>
-            <p className="home-intro__lede">
-              Present detailed text, design work, or motion to up to ten viewers at full
-              resolution. No install, no media server, no chat-app compression preset.
-            </p>
-            <div className="topology-line" aria-label="One presenter sends independent streams to up to ten invited viewers">
-              <span>Presenter</span>
-              <span className="topology-line__rule" aria-hidden="true" />
-              <span className="topology-line__arrow" aria-hidden="true">→</span>
-              <span>1–10 invited viewers</span>
-            </div>
+    <div className="shell-page shell-home">
+      {rooms.length === 0 ? (
+        <div className="shell-empty">
+          <h1>Nothing live yet</h1>
+          <p>
+            When a friend opens a room it shows up here. Start your own, or add
+            friends by trading codes so you can see each other's rooms.
+          </p>
+          <div className="shell-empty__actions">
+            <button type="button" className="shell-button shell-button--accent" onClick={openCreateRoom}>
+              Create room
+            </button>
           </div>
-          <CreateRoomForm />
-        </section>
-
-        <section className="landing-section" aria-labelledby="process-title">
-          <div className="landing-section__inner">
-            <p className="eyebrow">Process</p>
-            <h2 id="process-title" className="landing-section__title">From link to live in under a minute.</h2>
-            <div className="process-grid">
-              <ProcessStep index="01" title="Create a room">
-                Set the admission policy, viewer cap, and lifetime. Nothing about the room persists after it closes.
-              </ProcessStep>
-              <ProcessStep index="02" title="Send one link">
-                A single secure URL. Viewers join directly, or wait in the lobby until you admit them.
-              </ProcessStep>
-              <ProcessStep index="03" title="Present at full resolution">
-                Your screen streams peer to peer, unscaled and uncompressed, with each connection monitored live.
-              </ProcessStep>
-            </div>
-          </div>
-        </section>
-
-        <section className="landing-section topology-section" aria-labelledby="topology-title">
-          <div className="landing-section__inner">
-            <p className="eyebrow">Topology</p>
-            <h2 id="topology-title" className="landing-section__title">Why the direct path looks better.</h2>
-
-            <figure className="network-diagram">
-              <figcaption className="sr-only">
-                The presenter connects directly to each viewer when possible, with an encrypted relay as a backup route.
-              </figcaption>
-              <div className="network-node">
-                <span className="network-node__screen" aria-hidden="true" />
-                <span>Presenter</span>
-              </div>
-              <div className="network-path" aria-hidden="true">
-                <span>Direct connection · full resolution</span>
-                <span className="network-path__line" />
-                <span className="network-path__branch" />
-                <span className="network-path__relay"><i />Backup route · used only if needed</span>
-              </div>
-              <div className="network-node">
-                <span className="network-node__viewers" aria-hidden="true">
-                  {Array.from({ length: 10 }, (_, index) => <i key={index} />)}
-                </span>
-                <span>Up to 10 viewers</span>
-              </div>
-            </figure>
-
-            <div className="topology-grid">
-              <TopologyPoint title="Direct first">
-                Your browser connects straight to each viewer whenever the network allows it. This is the shortest path, with the least delay and no extra recompression.
-              </TopologyPoint>
-              <TopologyPoint title="Relay when needed">
-                When a direct path is not possible, your stream uses an encrypted backup relay, with a little more delay and a lower quality ceiling.
-              </TopologyPoint>
-              <TopologyPoint title="Quality, visible">
-                Every connection reports its path, bitrate, and frame health live, so you can see and act on a drop in fidelity.
-              </TopologyPoint>
-            </div>
-          </div>
-        </section>
-      </main>
-      <footer className="landing-footer">
-        <span>Clarity Share: high-fidelity, install-free screen sharing.</span>
-        <span>No sign-up required. Each room cleans itself up automatically once it closes.</span>
-      </footer>
+        </div>
+      ) : (
+        <div className="shell-home__cards">
+          {rooms.map((row) =>
+            row.hosting!.sharingState === 'live' ? (
+              <LiveCard key={row.code} row={row} />
+            ) : (
+              <IdleCard key={row.code} row={row} />
+            ),
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function ProcessStep({ index, title, children }: { index: string; title: string; children: string }) {
+function LiveCard({ row }: { row: FriendRow }) {
+  const hosting = row.hosting!;
   return (
-    <article>
-      <span className="step-index" aria-hidden="true">{index}</span>
-      <h3>{title}</h3>
-      <p>{children}</p>
+    <article className="room-card room-card--live">
+      <div className="room-card__preview">
+        <span className="room-card__live-pill">
+          <i className="pulse-dot" aria-hidden="true" />
+          LIVE
+        </span>
+      </div>
+      <div className="room-card__body">
+        <div className="room-card__copy">
+          <strong>{row.name} is sharing</strong>
+          <span>
+            {hosting.viewerCount === 0
+              ? 'Nobody watching yet'
+              : `${hosting.viewerCount} ${hosting.viewerCount === 1 ? 'viewer' : 'viewers'} watching`}
+          </span>
+        </div>
+        <a className="shell-button shell-button--accent" href={hosting.viewerUrl}>
+          Join
+        </a>
+      </div>
     </article>
   );
 }
 
-function TopologyPoint({ title, children }: { title: string; children: string }) {
+function IdleCard({ row }: { row: FriendRow }) {
+  const hosting = row.hosting!;
+  const paused = hosting.sharingState === 'paused';
   return (
-    <article>
-      <h3>{title}</h3>
-      <p>{children}</p>
+    <article className="room-card room-card--idle">
+      <span className="friend-row__avatar friend-row__avatar--large" aria-hidden="true">
+        {initials(row.name)}
+      </span>
+      <div className="room-card__copy">
+        <strong>{row.name}'s room</strong>
+        <span>
+          {paused ? 'Sharing paused' : 'Open, nobody sharing yet'}
+          {hosting.viewerCount > 0 ? ` · ${hosting.viewerCount + 1} here` : ''}
+        </span>
+      </div>
+      <a className="shell-button shell-button--ghost" href={hosting.viewerUrl}>
+        Join
+      </a>
     </article>
   );
 }

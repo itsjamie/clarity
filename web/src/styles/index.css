@@ -387,9 +387,6 @@ code,
   box-shadow: var(--shadow-low);
 }
 
-.home-shell .create-room__heading { display: grid; grid-template-columns: auto 1fr; gap: 12px; }
-.home-shell .create-room__heading h2 { margin-bottom: 6px; font-size: 1.0625rem; font-weight: 600; }
-.home-shell .create-room__heading p { color: var(--text-muted); font-size: 0.8rem; line-height: 1.55; }
 .home-shell .choice-group legend {
   margin-bottom: 10px;
   color: oklch(0.56 0.014 260);
@@ -607,6 +604,7 @@ code,
 .choice-group { margin: 0; padding: 0; border: 0; }
 .choice-group legend { margin-bottom: 8px; color: var(--text-muted); font-size: 0.75rem; font-weight: 600; }
 .segmented-control { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.segmented-control--stack { grid-template-columns: minmax(0, 1fr); }
 .mode-option { min-height: 72px; display: grid; align-content: center; gap: 5px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); text-align: left; color: var(--text); background: var(--surface-2); cursor: pointer; }
 .mode-option:hover { border-color: var(--line-strong); }
 .mode-option--active { border-color: var(--accent); background: var(--accent-soft); }
