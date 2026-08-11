@@ -1,8 +1,13 @@
-export const PROTOCOL_VERSION = 4 as const;
+export const PROTOCOL_VERSION = 5 as const;
 
 export function signalingUrl(location: Location = window.location): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${location.host}/api/v1/ws`;
+}
+
+export function presenceUrl(location: Location = window.location): string {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}/api/v1/presence`;
 }
 
 export function isSyntheticCaptureEnabled(): boolean {

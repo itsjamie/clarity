@@ -13,7 +13,7 @@ describe('ScreenCaptureManager', () => {
     const getDisplayMedia = installDisplayCapture(createCaptureStream(true));
     const manager = new ScreenCaptureManager(vi.fn());
 
-    await manager.start('text', true);
+    await manager.start('text', true, '1440p');
 
     expect(getDisplayMedia).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -28,7 +28,7 @@ describe('ScreenCaptureManager', () => {
     const getDisplayMedia = installDisplayCapture(createCaptureStream(false));
     const manager = new ScreenCaptureManager(vi.fn());
 
-    await manager.start('text', false);
+    await manager.start('text', false, '1440p');
 
     expect(getDisplayMedia).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -38,10 +38,43 @@ describe('ScreenCaptureManager', () => {
     );
     expect(getDisplayMedia.mock.calls[0]?.[0]).not.toHaveProperty('systemAudio');
   });
+
+  it.each([
+    ['1440p', 2560, 1440],
+    ['4k', 3840, 2160],
+  ] as const)('requests the %s capture target on the native track', async (resolution, width, height) => {
+    const getDisplayMedia = installDisplayCapture(createCaptureStream(false));
+    const manager = new ScreenCaptureManager(vi.fn());
+
+    await manager.start('text', false, resolution);
+
+    const options = getDisplayMedia.mock.calls[0]?.[0];
+    expect(options?.video).toEqual(expect.objectContaining({
+      width: { ideal: width, max: width },
+      height: { ideal: height, max: height },
+    }));
+  });
+
+  it.each([
+    ['text', 30],
+    ['motion', 60],
+  ] as const)('caps %s capture at %i FPS before encoding', async (mode, frameRate) => {
+    const getDisplayMedia = installDisplayCapture(createCaptureStream(false));
+    const manager = new ScreenCaptureManager(vi.fn());
+
+    await manager.start(mode, false, '1440p');
+
+    const options = getDisplayMedia.mock.calls[0]?.[0];
+    expect(options?.video).toEqual(expect.objectContaining({
+      frameRate: { ideal: frameRate, max: frameRate },
+    }));
+  });
 });
 
 function installDisplayCapture(stream: MediaStream) {
-  const getDisplayMedia = vi.fn().mockResolvedValue(stream);
+  const getDisplayMedia = vi
+    .fn<(options: DisplayMediaStreamOptions) => Promise<MediaStream>>()
+    .mockResolvedValue(stream);
   Object.defineProperty(window, 'isSecureContext', {
     configurable: true,
     value: true,

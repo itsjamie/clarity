@@ -2,7 +2,7 @@ import type { FormEvent } from 'react';
 
 import { Button } from '@/components/ui/button';
 import type { RoomSnapshot } from '@/generated/protocol';
-import type { BitrateSample } from '../metrics/bitrate-history';
+import type { BitrateSample } from '@/lib/metrics/bitrate-history';
 import type { PresenterPeerStatus } from '../webrtc/presenter-connection-manager';
 import { formatBitrate, formatPercent, formatResolution } from '@/utils/format';
 import { BitrateHistoryGraph } from './bitrate-history-graph';
@@ -72,7 +72,7 @@ export function PresenterSidebar({
         <div className="presenter-sidebar__heading">
           <div>
             <h2 id="invite-viewers-title">Invite viewers</h2>
-            <span>{requiresApproval ? 'Approval required' : 'Public link'} · Expires in {expiresIn}</span>
+            <span>{policyLabel(snapshot?.accessPolicy)} · Expires in {expiresIn}</span>
           </div>
         </div>
 
@@ -267,6 +267,17 @@ function viewerHealth(status: PresenterPeerStatus | undefined): {
   }
   if (status?.connectionState === 'connected') return { label: 'Good', tone: 'good' };
   return { label: 'Connecting', tone: 'connecting' };
+}
+
+function policyLabel(accessPolicy: RoomSnapshot['accessPolicy'] | undefined): string {
+  switch (accessPolicy) {
+    case 'approvalRequired':
+      return 'Approval required';
+    case 'friendsOnly':
+      return 'Friends only';
+    default:
+      return 'Public link';
+  }
 }
 
 function describeConnections(statusCount: number, directCount: number, relayCount: number): string {

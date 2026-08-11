@@ -1,6 +1,7 @@
 import { isSyntheticCaptureEnabled } from '@/config/environment';
 import { storageKeys } from '@/lib/storage/session-storage';
 import type { CaptureMode } from '@/lib/webrtc/profiles';
+import { captureDimensions, type CaptureResolution } from '@/lib/media/capture-resolution';
 
 export interface CaptureSettings {
   width?: number;
@@ -38,9 +39,13 @@ export class ScreenCaptureManager {
     return this.#stream;
   }
 
-  public async start(mode: CaptureMode, includeAudio: boolean): Promise<CaptureResult> {
+  public async start(
+    mode: CaptureMode,
+    includeAudio: boolean,
+    resolution: CaptureResolution,
+  ): Promise<CaptureResult> {
     if (this.#stream) throw new Error('A capture source is already active.');
-    const result = await this.#acquire(mode, includeAudio);
+    const result = await this.#acquire(mode, includeAudio, resolution);
     this.#adopt(result.stream);
     return result;
   }
@@ -48,10 +53,11 @@ export class ScreenCaptureManager {
   public async changeSource(
     mode: CaptureMode,
     includeAudio: boolean,
+    resolution: CaptureResolution,
     replaceTracks: (stream: MediaStream) => Promise<string[]>,
   ): Promise<CaptureResult> {
     const previous = this.#stream;
-    const result = await this.#acquire(mode, includeAudio);
+    const result = await this.#acquire(mode, includeAudio, resolution);
     const failures = await replaceTracks(result.stream);
     if (failures.length > 0) {
       result.stream.getTracks().forEach((track) => track.stop());
@@ -71,16 +77,21 @@ export class ScreenCaptureManager {
     this.#intentionalStop = false;
   }
 
-  async #acquire(mode: CaptureMode, includeAudio: boolean): Promise<CaptureResult> {
+  async #acquire(
+    mode: CaptureMode,
+    includeAudio: boolean,
+    resolution: CaptureResolution,
+  ): Promise<CaptureResult> {
     let stream: MediaStream;
+    const dimensions = captureDimensions(resolution);
     if (
       isSyntheticCaptureEnabled() &&
       window.sessionStorage.getItem(storageKeys.syntheticCapture) === 'enabled'
     ) {
       const { createSyntheticCapture } = await import('@/testing/synthetic-capture');
       stream = createSyntheticCapture({
-        width: 1920,
-        height: 1080,
+        width: dimensions.width,
+        height: dimensions.height,
         framesPerSecond: mode === 'motion' ? 60 : 30,
       });
     } else {
@@ -90,9 +101,11 @@ export class ScreenCaptureManager {
       const frameRate = mode === 'motion' ? 60 : 30;
       const options: ExtendedDisplayMediaOptions = {
         video: {
-          width: { ideal: 2560 },
-          height: { ideal: 1440 },
-          frameRate: { ideal: frameRate },
+          // Constrain the browser's native capture track instead of introducing a
+          // canvas copy and a second scaling step in the application.
+          width: { ideal: dimensions.width, max: dimensions.width },
+          height: { ideal: dimensions.height, max: dimensions.height },
+          frameRate: { ideal: frameRate, max: frameRate },
         },
         audio: includeAudio,
         windowAudio: includeAudio ? 'window' : 'exclude',

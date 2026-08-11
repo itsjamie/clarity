@@ -3,44 +3,38 @@ import type { CodecMode } from '@/lib/webrtc/codec-capability-service';
 import type { CaptureMode, EncodingProfile, QualityStrategy } from '@/lib/webrtc/profiles';
 import { formatResolution } from '@/utils/format';
 import type { PresenterSessionState } from '../session/presenter-session';
+import {
+  captureDimensions,
+  type CaptureResolution,
+} from '@/lib/media/capture-resolution';
 import { LocalStreamPreview } from './local-stream-preview';
 
 interface PresenterStageProps {
   state: PresenterSessionState;
   requestedProfile: EncodingProfile;
   codecModes: readonly CodecMode[];
-  confirmEnd: boolean;
   onSetPreferences: (preferences: {
     captureMode?: CaptureMode;
+    captureResolution?: CaptureResolution;
     qualityStrategy?: QualityStrategy;
     codecMode?: CodecMode;
     audioRequested?: boolean;
   }) => void;
-  onStartSharing: () => void;
-  onStopSharing: () => void;
   onChangeSource: () => void;
-  onRequestEnd: () => void;
-  onCancelEnd: () => void;
-  onEndRoom: () => void;
 }
 
 export function PresenterStage({
   state,
   requestedProfile,
   codecModes,
-  confirmEnd,
   onSetPreferences,
-  onStartSharing,
-  onStopSharing,
   onChangeSource,
-  onRequestEnd,
-  onCancelEnd,
-  onEndRoom,
 }: PresenterStageProps) {
   const modeDescription = state.captureMode === 'text' ? 'Text & documents' : 'Motion & video';
+  const captureTarget = captureDimensions(state.captureResolution);
   const resolution = state.captureActive
     ? formatResolution(state.captureSettings?.width, state.captureSettings?.height)
-    : '2560 × 1440 target';
+    : `${formatResolution(captureTarget.width, captureTarget.height)} target`;
   const frameRate = state.captureActive
     ? state.captureSettings?.frameRate?.toFixed(0) ?? 'Unknown'
     : String(requestedProfile.maxFramerate);
@@ -66,33 +60,7 @@ export function PresenterStage({
           <span aria-hidden="true">·</span>
           <span>{modeDescription} · {resolution} · {frameRate} FPS</span>
         </div>
-        <div className="presenter-stage__header-actions">
-          {state.captureActive ? (
-            <Button variant="secondary" onClick={onStopSharing} disabled={state.ended}>
-              Stop sharing
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              onClick={onStartSharing}
-              disabled={state.signaling !== 'connected' || state.ended}
-            >
-              {state.sharingPaused ? 'Choose source to resume' : 'Start sharing'}
-            </Button>
-          )}
-          <Button variant="danger" onClick={onRequestEnd} disabled={state.ended}>
-            End room
-          </Button>
-        </div>
       </header>
-
-      {confirmEnd ? (
-        <div className="presenter-stage__confirm" role="alert">
-          <span>Ending this room disconnects every viewer.</span>
-          <Button variant="danger" onClick={onEndRoom}>End room now</Button>
-          <Button variant="quiet" onClick={onCancelEnd}>Keep room open</Button>
-        </div>
-      ) : null}
 
       <LocalStreamPreview
         stream={state.previewStream}
@@ -129,6 +97,21 @@ export function PresenterStage({
             disabled={state.captureActive || state.ended}
           />
           <span>Share audio</span>
+        </label>
+
+        <label className="presenter-stage__select">
+          <span className="sr-only">Capture resolution</span>
+          <select
+            aria-label="Capture resolution"
+            value={state.captureResolution}
+            onChange={(event) => onSetPreferences({
+              captureResolution: event.target.value as CaptureResolution,
+            })}
+            disabled={state.ended}
+          >
+            <option value="1440p">1440p capture</option>
+            <option value="4k">4K capture</option>
+          </select>
         </label>
 
         <label className="presenter-stage__select">

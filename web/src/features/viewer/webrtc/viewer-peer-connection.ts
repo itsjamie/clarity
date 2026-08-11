@@ -1,5 +1,11 @@
-import type { ClientMessage, IceConfiguration } from '@/generated/protocol';
+import type { ChatMessage, ClientMessage, IceConfiguration } from '@/generated/protocol';
 import { PROTOCOL_VERSION } from '@/config/environment';
+import {
+  CHAT_CHANNEL_LABEL,
+  decodeChatMessage,
+  encodeChatMessage,
+} from '@/lib/chat/chat-channel';
+import { forceRelayEnabled } from '@/lib/settings/app-settings';
 import {
   WebRtcStatsCollector,
   type WebRtcMetrics,
@@ -10,6 +16,7 @@ interface ViewerPeerConnectionOptions {
   onStream: (stream: MediaStream) => void;
   onMetrics: (metrics: WebRtcMetrics) => void;
   onState: (connection: RTCPeerConnectionState, ice: RTCIceConnectionState) => void;
+  onChat: (message: ChatMessage) => void;
 }
 
 export class ViewerPeerConnection {
@@ -19,6 +26,8 @@ export class ViewerPeerConnection {
   #queuedCandidates: RTCIceCandidateInit[] = [];
   #stats: WebRtcStatsCollector | null = null;
   #stream = new MediaStream();
+  #chat: RTCDataChannel | null = null;
+  #queuedChat: string[] = [];
 
   public constructor(options: ViewerPeerConnectionOptions) {
     this.#options = options;
@@ -53,9 +62,24 @@ export class ViewerPeerConnection {
     }
   }
 
+  /** Sends a chat envelope; queued until the presenter's channel opens. */
+  public sendChat(message: ChatMessage): void {
+    const payload = encodeChatMessage(message);
+    if (this.#chat?.readyState === 'open') {
+      this.#chat.send(payload);
+    } else {
+      this.#queuedChat.push(payload);
+    }
+  }
+
   public close(): void {
     this.#stats?.stop();
     this.#stats = null;
+    if (this.#chat) {
+      this.#chat.onmessage = null;
+      this.#chat.onopen = null;
+      this.#chat = null;
+    }
     this.#connection?.close();
     this.#connection = null;
     this.#queuedCandidates = [];
@@ -72,11 +96,7 @@ export class ViewerPeerConnection {
       })),
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
-      iceTransportPolicy:
-        import.meta.env.MODE === 'test' &&
-        window.sessionStorage.getItem('clarity:test:force-relay') === 'enabled'
-          ? 'relay'
-          : 'all',
+      iceTransportPolicy: forceRelayEnabled() ? 'relay' : 'all',
     });
     connection.onicecandidate = ({ candidate }) => {
       if (!candidate) return;
@@ -100,6 +120,10 @@ export class ViewerPeerConnection {
       }
       this.#options.onStream(this.#stream);
     };
+    connection.ondatachannel = ({ channel }) => {
+      if (channel.label !== CHAT_CHANNEL_LABEL) return;
+      this.#adoptChatChannel(channel);
+    };
     const emitState = () =>
       this.#options.onState(connection.connectionState, connection.iceConnectionState);
     connection.onconnectionstatechange = emitState;
@@ -108,5 +132,21 @@ export class ViewerPeerConnection {
     this.#stats.start();
     this.#connection = connection;
     return connection;
+  }
+
+  #adoptChatChannel(channel: RTCDataChannel): void {
+    this.#chat = channel;
+    channel.onmessage = (event: MessageEvent<unknown>) => {
+      const message = decodeChatMessage(event.data);
+      if (message) this.#options.onChat(message);
+    };
+    const flush = () => {
+      for (const payload of this.#queuedChat.splice(0)) channel.send(payload);
+    };
+    if (channel.readyState === 'open') {
+      flush();
+    } else {
+      channel.onopen = flush;
+    }
   }
 }

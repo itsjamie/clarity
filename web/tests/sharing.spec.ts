@@ -9,15 +9,16 @@ interface ViewerHarness {
 test.describe('Clarity Share browser mesh', () => {
   test('defaults to public admission and connects an invited viewer without approval', async ({ browser, page, baseURL }) => {
     await enableSyntheticCapture(page);
-    await page.goto('/');
-    await expect(page.getByRole('button', { name: /Public link/u })).toHaveAttribute('aria-pressed', 'true');
+    await page.goto('/welcome');
+    await expect(page.getByRole('button', { name: /Anyone with the link/u })).toHaveAttribute('aria-pressed', 'true');
     const creationLimit = page.getByRole('spinbutton', { name: /Viewer limit/u });
     await expect(creationLimit).toHaveValue('10');
     await expect(creationLimit).toBeDisabled();
-    await page.getByRole('button', { name: 'Create room' }).click();
+    await page.getByRole('button', { name: 'Open room' }).click();
     await expect(page.getByText('Ready to share', { exact: true })).toBeVisible();
+    await openRoomTab(page);
     await expect(page.getByText(/Public link · Expires in/u)).toBeVisible();
-    await page.getByRole('button', { name: 'Start sharing' }).click();
+    await page.getByRole('button', { name: 'Share my screen' }).click();
 
     const toolbarBounds = await page.locator('.presenter-stage__toolbar').boundingBox();
     const changeSourceBounds = await page.getByRole('button', { name: 'Change source' }).boundingBox();
@@ -54,13 +55,14 @@ test.describe('Clarity Share browser mesh', () => {
 
   test('approves independent viewers, pauses and resumes sharing, removes one, and ends cleanly', async ({ browser, page, baseURL }) => {
     await enableSyntheticCapture(page);
-    await page.goto('/');
+    await page.goto('/welcome');
     await selectApprovalRequired(page);
-    await page.getByRole('button', { name: 'Create room' }).click();
+    await page.getByRole('button', { name: 'Open room' }).click();
     await expect(page).toHaveURL(/\/present\//u);
     await expect(page.getByText('Ready to share', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Start sharing' }).click();
+    await page.getByRole('button', { name: 'Share my screen' }).click();
     await expect(page.getByText("You're sharing your screen", { exact: true })).toBeVisible();
+    await openRoomTab(page);
 
     const invite = await viewerInvite(page, baseURL ?? 'http://127.0.0.1:5173');
     const first = await joinViewer(browser, invite, 'Ada Viewer');
@@ -77,8 +79,9 @@ test.describe('Clarity Share browser mesh', () => {
     await first.page.getByRole('button', { name: 'Zoom in' }).click();
     await expect(first.page.locator('.viewer-zoom-control output')).toHaveText('125%');
     await first.page.getByRole('button', { name: 'Fit', exact: true }).click();
+    await first.page.locator('.viewer-controls-zone').hover();
     await first.page.getByRole('button', { name: 'Diagnostics' }).click();
-    await expect(first.page.locator('.quality-hud')).toBeVisible();
+    await expect(first.page.locator('.room-diag')).toBeVisible();
     await expect(first.page.getByRole('button', { name: 'Enter fullscreen' })).toBeVisible();
 
     const second = await joinViewer(browser, invite, 'Grace Viewer');
@@ -91,33 +94,33 @@ test.describe('Clarity Share browser mesh', () => {
     await expectViewerLive(first.page);
     await expectViewerLive(second.page);
 
-    await page.getByRole('button', { name: 'Stop sharing' }).click();
+    await page.getByRole('button', { name: 'Pause', exact: true }).click();
     await expect(page.locator('#presenter-stage-status')).toHaveText('Sharing paused');
     await expect(page.getByText('2 active', { exact: true })).toBeVisible();
-    await expect(first.page.getByText('Sharing paused', { exact: true })).toBeVisible();
-    await expect(second.page.getByText('Sharing paused', { exact: true })).toBeVisible();
+    await expect(first.page.locator('.viewer-sharing-paused')).toBeVisible();
+    await expect(second.page.locator('.viewer-sharing-paused')).toBeVisible();
     await expect(first.page.getByRole('heading', { name: 'The share has ended' })).toHaveCount(0);
     await expect(second.page.getByRole('heading', { name: 'The share has ended' })).toHaveCount(0);
 
     const late = await joinViewer(browser, invite, 'Late Viewer');
     await approveViewer(page, 'Late Viewer');
-    await expect(late.page.getByText('Sharing paused', { exact: true })).toBeVisible();
+    await expect(late.page.locator('.viewer-sharing-paused')).toBeVisible();
     await expect(page.getByText('3 active', { exact: true })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Choose source to resume' }).click();
+    await page.getByRole('button', { name: 'Resume sharing' }).click();
     await expect(page.getByText("You're sharing your screen", { exact: true })).toBeVisible();
-    await expectViewerResolution(first.page, 1920, 1080);
-    await expectViewerResolution(second.page, 1920, 1080);
-    await expectViewerResolution(late.page, 1920, 1080);
-    await expect(late.page.getByText('Sharing paused', { exact: true })).toHaveCount(0);
+    await expectViewerResolution(first.page, 2560, 1440);
+    await expectViewerResolution(second.page, 2560, 1440);
+    await expectViewerResolution(late.page, 2560, 1440);
+    await expect(late.page.locator('.viewer-sharing-paused')).toHaveCount(0);
 
     const graceCard = page.locator('.peer-card').filter({ hasText: 'Grace Viewer' });
     await graceCard.getByRole('button', { name: 'Remove viewer' }).click();
     await expect(second.page.getByRole('heading', { name: 'You were removed' })).toBeVisible();
     await expectViewerLive(first.page);
 
-    await page.getByRole('button', { name: 'End room' }).click();
-    await page.getByRole('button', { name: 'End room now' }).click();
+    await page.getByRole('button', { name: 'Close room', exact: true }).click();
+    await page.getByRole('button', { name: 'Close room now' }).click();
     await expect(first.page.getByRole('heading', { name: 'The share has ended' })).toBeVisible();
     await expect(late.page.getByRole('heading', { name: 'The share has ended' })).toBeVisible();
 
@@ -126,11 +129,37 @@ test.describe('Clarity Share browser mesh', () => {
     await late.context.close();
   });
 
+  test('relays chat between peers over the data channel while the room is idle', async ({ browser, page, baseURL }) => {
+    await enableSyntheticCapture(page);
+    await page.goto('/welcome');
+    await page.getByRole('button', { name: 'Open room' }).click();
+    await expect(page.getByText('Ready to share', { exact: true })).toBeVisible();
+
+    const invite = await viewerInvite(page, baseURL ?? 'http://127.0.0.1:5173');
+    const first = await joinViewer(browser, invite, 'First Viewer', false);
+    const second = await joinViewer(browser, invite, 'Second Viewer', false);
+    await expect(first.page.getByText('Nobody is sharing right now. Chat stays open.')).toBeVisible({ timeout: 15_000 });
+    await expect(second.page.getByText('Nobody is sharing right now. Chat stays open.')).toBeVisible({ timeout: 15_000 });
+
+    await page.getByPlaceholder('Message the room').fill('hello from the presenter');
+    await page.getByPlaceholder('Message the room').press('Enter');
+    await expect(first.page.getByText('hello from the presenter')).toBeVisible({ timeout: 15_000 });
+    await expect(second.page.getByText('hello from the presenter')).toBeVisible();
+
+    await first.page.getByPlaceholder('Message the room').fill('hi from a viewer');
+    await first.page.getByPlaceholder('Message the room').press('Enter');
+    await expect(page.getByText('hi from a viewer')).toBeVisible({ timeout: 15_000 });
+    await expect(second.page.getByText('hi from a viewer')).toBeVisible({ timeout: 15_000 });
+
+    await first.context.close();
+    await second.context.close();
+  });
+
   test('keeps the invitation secret out of HTTP-visible URL components and blocks a fifth approval', async ({ browser, page, baseURL }) => {
     await enableSyntheticCapture(page);
-    await page.goto('/');
+    await page.goto('/welcome');
     await selectApprovalRequired(page);
-    await page.getByRole('button', { name: 'Create room' }).click();
+    await page.getByRole('button', { name: 'Open room' }).click();
     await expect(page.getByText('Ready to share', { exact: true })).toBeVisible();
     const invite = await viewerInvite(page, baseURL ?? 'http://127.0.0.1:5173');
     const parsedInvite = new URL(invite);
@@ -146,8 +175,9 @@ test.describe('Clarity Share browser mesh', () => {
     }
     const fifth = await joinViewer(browser, invite, 'Viewer Five');
     viewers.push(fifth);
-    const pendingRow = page.locator('.pending-list li').filter({ hasText: 'Viewer Five' });
-    await expect(pendingRow.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    const pendingPrompt = page.locator('.join-prompt').filter({ hasText: 'Viewer Five' });
+    await expect(pendingPrompt.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    await openRoomTab(page);
     await expect(page.getByText('4 of 4 slots used', { exact: true })).toBeVisible();
 
     for (const viewer of viewers) await viewer.context.close();
@@ -158,6 +188,10 @@ async function enableSyntheticCapture(page: Page): Promise<void> {
   await page.addInitScript(() => {
     window.sessionStorage.setItem('clarity:test:synthetic-capture', 'enabled');
   });
+}
+
+async function openRoomTab(page: Page): Promise<void> {
+  await page.getByRole('tab', { name: 'Room', exact: true }).click();
 }
 
 async function viewerInvite(presenter: Page, baseURL: string): Promise<string> {
@@ -186,7 +220,7 @@ async function joinViewer(
   if (requiresApproval) {
     await page.getByLabel('Display name optional').fill(name);
     await page.getByRole('button', { name: 'Join room' }).click();
-    await expect(page.getByText('Awaiting approval', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Waiting for the presenter' })).toBeVisible();
   } else {
     await expect(page.getByLabel('Display name optional')).toHaveCount(0);
   }
@@ -194,16 +228,16 @@ async function joinViewer(
 }
 
 async function selectApprovalRequired(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /Approval required/u }).click();
-  await expect(page.getByRole('button', { name: /Approval required/u })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: /Ask me first/u }).click();
+  await expect(page.getByRole('button', { name: /Ask me first/u })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('spinbutton', { name: /Viewer limit/u })).toHaveValue('4');
   await expect(page.getByRole('spinbutton', { name: /Viewer limit/u })).toBeEnabled();
 }
 
 async function approveViewer(presenter: Page, name: string): Promise<void> {
-  const row = presenter.locator('.pending-list li').filter({ hasText: name });
-  await expect(row).toBeVisible();
-  await row.getByRole('button', { name: 'Approve' }).click();
+  const prompt = presenter.locator('.join-prompt').filter({ hasText: name });
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole('button', { name: 'Approve' }).click();
 }
 
 async function expectViewerLive(page: Page): Promise<void> {

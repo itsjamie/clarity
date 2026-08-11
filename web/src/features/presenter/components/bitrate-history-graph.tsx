@@ -4,7 +4,7 @@ import {
   bitrateChartCeiling,
   bitratePeak,
   type BitrateSample,
-} from '../metrics/bitrate-history';
+} from '@/lib/metrics/bitrate-history';
 
 interface BitrateHistoryGraphProps {
   currentBitrate: number;

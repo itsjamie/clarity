@@ -1,6 +1,13 @@
-import type { ClientMessage, IceConfiguration } from '@/generated/protocol';
+import type { ChatMessage, ClientMessage, IceConfiguration } from '@/generated/protocol';
 import { PROTOCOL_VERSION } from '@/config/environment';
+import {
+  CHAT_CHANNEL_LABEL,
+  decodeChatMessage,
+  encodeChatMessage,
+  relayChatPayload,
+} from '@/lib/chat/chat-channel';
 import type { DiagnosticsCollector } from '@/lib/diagnostics/diagnostics-collector';
+import { forceRelayEnabled } from '@/lib/settings/app-settings';
 import {
   CodecCapabilityService,
   type CodecMode,
@@ -34,6 +41,7 @@ export interface PresenterPeerStatus {
 interface PresenterConnectionManagerOptions {
   sendSignal: (message: ClientMessage) => void;
   onStatus: (status: PresenterPeerStatus) => void;
+  onChat: (peerId: string, message: ChatMessage) => void;
   diagnostics: DiagnosticsCollector;
 }
 
@@ -42,6 +50,7 @@ interface PeerEntry {
   connection: RTCPeerConnection;
   videoSender: RTCRtpSender;
   audioSender: RTCRtpSender | null;
+  chat: RTCDataChannel | null;
   mode: CaptureMode;
   queuedCandidates: RTCIceCandidateInit[];
   stats: WebRtcStatsCollector;
@@ -57,6 +66,7 @@ export class PresenterConnectionManager {
   readonly #options: PresenterConnectionManagerOptions;
   readonly #entries = new Map<string, PeerEntry>();
   readonly #approvedViewerIds = new Set<string>();
+  readonly #displayNames = new Map<string, string | null>();
   readonly #senderParameters = new SenderParameterController();
   readonly #codecs = new CodecCapabilityService();
   #source: MediaStream | null = null;
@@ -90,30 +100,53 @@ export class PresenterConnectionManager {
     );
   }
 
-  public async setSource(stream: MediaStream): Promise<void> {
+  public async setSource(stream: MediaStream): Promise<string[]> {
     this.#source = stream;
+    const failures = this.#entries.size > 0 ? await this.replaceSource(stream) : [];
     for (const peerId of this.#approvedViewerIds) {
       if (!this.#entries.has(peerId)) await this.#createPeer(peerId);
     }
+    return failures;
   }
 
   public async addApprovedViewer(peerId: string): Promise<void> {
     this.#approvedViewerIds.add(peerId);
-    if (this.#source && !this.#entries.has(peerId)) await this.#createPeer(peerId);
+    if (!this.#entries.has(peerId)) await this.#createPeer(peerId);
+  }
+
+  /**
+   * Records the server-known display name chat from this viewer is stamped
+   * with when relayed; `null` falls back to "Viewer".
+   */
+  public setViewerDisplayName(peerId: string, displayName: string | null): void {
+    this.#displayNames.set(peerId, displayName);
   }
 
   public removeViewer(peerId: string): void {
     this.#approvedViewerIds.delete(peerId);
+    this.#displayNames.delete(peerId);
     const entry = this.#entries.get(peerId);
     if (!entry) return;
     if (entry.recoveryTimer !== null) window.clearTimeout(entry.recoveryTimer);
     entry.stats.stop();
+    if (entry.chat) {
+      entry.chat.onmessage = null;
+      entry.chat = null;
+    }
     entry.connection.onicecandidate = null;
     entry.connection.onconnectionstatechange = null;
     entry.connection.close();
     entry.queuedCandidates.length = 0;
     this.#entries.delete(peerId);
     this.#options.diagnostics.record('peer.removed', { peerId });
+  }
+
+  /** Sends a chat envelope to every viewer whose channel is open. */
+  public sendChat(message: ChatMessage): void {
+    const payload = encodeChatMessage(message);
+    for (const entry of this.#entries.values()) {
+      if (entry.chat?.readyState === 'open') entry.chat.send(payload);
+    }
   }
 
   public async applyAnswer(peerId: string, sdp: string): Promise<void> {
@@ -210,28 +243,35 @@ export class PresenterConnectionManager {
   }
 
   async #createPeer(peerId: string): Promise<void> {
-    if (!this.#source || !this.#iceConfiguration) return;
+    if (!this.#iceConfiguration) return;
     const connection = new RTCPeerConnection({
       iceServers: toRtcIceServers(this.#iceConfiguration),
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
-      iceTransportPolicy: forcedRelayEnabled() ? 'relay' : 'all',
+      iceTransportPolicy: forceRelayEnabled() ? 'relay' : 'all',
     });
-    const videoTrack = this.#source.getVideoTracks()[0];
-    if (!videoTrack) throw new Error('The active source has no video track.');
-    const transceiver = connection.addTransceiver(videoTrack, {
-      direction: 'sendonly',
-      streams: [this.#source],
-    });
+    // The chat channel is created before negotiation so it rides the first
+    // offer; its label and JSON envelope match the native engine.
+    const chat = connection.createDataChannel(CHAT_CHANNEL_LABEL);
+    chat.onmessage = (event: MessageEvent<unknown>) => this.#onChatPayload(peerId, event.data);
+    const videoTrack = this.#source?.getVideoTracks()[0] ?? null;
+    // Without a source (idle room) a track-less sendonly transceiver keeps
+    // the media section ready, so starting a share never renegotiates.
+    const transceiver = videoTrack && this.#source
+      ? connection.addTransceiver(videoTrack, { direction: 'sendonly', streams: [this.#source] })
+      : connection.addTransceiver('video', { direction: 'sendonly' });
     await this.#codecs.applyPreference(transceiver, this.#codecMode);
-    const audioTrack = this.#source.getAudioTracks()[0];
-    const audioSender = audioTrack ? connection.addTrack(audioTrack, this.#source) : null;
+    const audioTrack = this.#source?.getAudioTracks()[0];
+    const audioSender = audioTrack && this.#source
+      ? connection.addTrack(audioTrack, this.#source)
+      : null;
     const adaptation = new QualityAdaptationController(this.#mode, this.#qualityStrategy);
     const entry: PeerEntry = {
       peerId,
       connection,
       videoSender: transceiver.sender,
       audioSender,
+      chat,
       mode: this.#mode,
       queuedCandidates: [],
       stats: new WebRtcStatsCollector(connection, 'outbound', (metrics) =>
@@ -341,6 +381,27 @@ export class PresenterConnectionManager {
     }, 8_000);
   }
 
+  #onChatPayload(fromPeerId: string, payload: unknown): void {
+    const message = decodeChatMessage(payload);
+    if (!message) {
+      this.#options.diagnostics.record('chat.dropped', { peerId: fromPeerId });
+      return;
+    }
+    // The envelope's sender field is client-asserted, so the relay hub stamps
+    // it with the server-known display name of the peer the payload arrived
+    // from; a viewer cannot speak as the presenter or another viewer.
+    const stamped: ChatMessage = {
+      sender: this.#displayNames.get(fromPeerId) ?? 'Viewer',
+      text: message.text,
+    };
+    relayChatPayload(
+      [...this.#entries.values()].map((entry) => [entry.peerId, entry.chat] as const),
+      fromPeerId,
+      encodeChatMessage(stamped),
+    );
+    this.#options.onChat(fromPeerId, stamped);
+  }
+
   #emit(entry: PeerEntry, metrics?: WebRtcMetrics): void {
     if (metrics) entry.metrics = metrics;
     this.#options.onStatus(this.#status(entry));
@@ -366,11 +427,4 @@ function toRtcIceServers(configuration: IceConfiguration): RTCIceServer[] {
     ...(server.username ? { username: server.username } : {}),
     ...(server.credential ? { credential: server.credential } : {}),
   }));
-}
-
-function forcedRelayEnabled(): boolean {
-  return (
-    import.meta.env.MODE === 'test' &&
-    window.sessionStorage.getItem('clarity:test:force-relay') === 'enabled'
-  );
 }

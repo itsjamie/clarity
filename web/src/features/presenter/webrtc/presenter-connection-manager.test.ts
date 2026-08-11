@@ -76,22 +76,82 @@ describe('presenter connection manager reconfiguration', () => {
     expect(manager.statuses).toHaveLength(1);
 
     await manager.addApprovedViewer('viewer-2');
-    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances).toHaveLength(2);
 
     const resumedStream = streamWith(resumedTrack);
-    await expect(manager.replaceSource(resumedStream)).resolves.toEqual([]);
-    await manager.setSource(resumedStream);
+    await expect(manager.setSource(resumedStream)).resolves.toEqual([]);
 
     expect(existingConnection.videoSender.replaceTrack).toHaveBeenLastCalledWith(resumedTrack);
     expect(FakePeerConnection.instances).toHaveLength(2);
     manager.stopAll();
   });
+
+  it('creates chat-ready peers for approved viewers before any source exists', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.addApprovedViewer('viewer-1');
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(activeConnection().chatChannel.label).toBe('chat');
+
+    await manager.setSource(streamWith(videoTrack('first')));
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('relays viewer chat stamped with the server-known name, never the claimed sender', async () => {
+    const onChat = vi.fn();
+    const manager = createManager(onChat);
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    manager.setViewerDisplayName('viewer-1', 'June');
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+    const [first, second] = FakePeerConnection.instances;
+    // The sender field is client-asserted; the hub must replace the spoofed
+    // "Presenter" with viewer-1's server-known name.
+    const payload = JSON.stringify({ sender: 'Presenter', text: 'hello' });
+    const stamped = JSON.stringify({ sender: 'June', text: 'hello' });
+
+    first!.chatChannel.receive(payload);
+
+    expect(second!.chatChannel.sent).toEqual([stamped]);
+    expect(first!.chatChannel.sent).toEqual([]);
+    expect(onChat).toHaveBeenCalledWith('viewer-1', { sender: 'June', text: 'hello' });
+
+    // A viewer with no known name falls back to "Viewer".
+    second!.chatChannel.receive(JSON.stringify({ sender: 'June', text: 'hey' }));
+    expect(onChat).toHaveBeenLastCalledWith('viewer-2', { sender: 'Viewer', text: 'hey' });
+
+    first!.chatChannel.receive('not an envelope');
+    expect(second!.chatChannel.sent).toEqual([stamped]);
+    expect(onChat).toHaveBeenCalledTimes(2);
+    manager.stopAll();
+  });
+
+  it('broadcasts presenter chat to every open channel', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+
+    manager.sendChat({ sender: 'Presenter', text: 'welcome' });
+
+    for (const connection of FakePeerConnection.instances) {
+      expect(connection.chatChannel.sent).toEqual([
+        JSON.stringify({ sender: 'Presenter', text: 'welcome' }),
+      ]);
+    }
+    manager.stopAll();
+  });
 });
 
-function createManager(): PresenterConnectionManager {
+function createManager(
+  onChat: (peerId: string, message: { sender: string; text: string }) => void = vi.fn(),
+): PresenterConnectionManager {
   return new PresenterConnectionManager({
     sendSignal: vi.fn(),
     onStatus: vi.fn(),
+    onChat,
     diagnostics: new DiagnosticsCollector(),
   });
 }
@@ -134,10 +194,28 @@ class FakeSender {
   }
 }
 
+class FakeDataChannel {
+  readonly readyState: RTCDataChannelState = 'open';
+  readonly sent: string[] = [];
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+  onopen: (() => void) | null = null;
+
+  public constructor(public readonly label: string) {}
+
+  public send(payload: string): void {
+    this.sent.push(payload);
+  }
+
+  public receive(payload: string): void {
+    this.onmessage?.({ data: payload } as MessageEvent<unknown>);
+  }
+}
+
 class FakePeerConnection {
   static readonly instances: FakePeerConnection[] = [];
 
   readonly videoSender = new FakeSender();
+  chatChannel!: FakeDataChannel;
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
   signalingState: RTCSignalingState = 'stable';
@@ -148,6 +226,11 @@ class FakePeerConnection {
 
   public constructor() {
     FakePeerConnection.instances.push(this);
+  }
+
+  public createDataChannel(label: string): RTCDataChannel {
+    this.chatChannel = new FakeDataChannel(label);
+    return this.chatChannel as unknown as RTCDataChannel;
   }
 
   public addTransceiver(): RTCRtpTransceiver {
