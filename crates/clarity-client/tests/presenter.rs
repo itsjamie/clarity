@@ -186,6 +186,7 @@ fn start_presenter(
             origin: endpoints.origin.clone(),
             source,
             audio: AudioCapture::Disabled,
+            audio_exclude: None,
             video_codecs: vec![VideoCodecId::Vp8],
             frame_rate: 15,
             capture_ceiling: None,

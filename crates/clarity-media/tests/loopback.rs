@@ -219,6 +219,7 @@ async fn broadcast_streams_to_playback_over_loopback() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -304,6 +305,7 @@ async fn adaptive_broadcast_delivers_audio_and_video() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -389,6 +391,7 @@ async fn av1_broadcast_streams_to_playback() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -473,6 +476,7 @@ async fn rebuilt_viewer_reconnects_and_flows() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -496,6 +500,7 @@ async fn rebuilt_viewer_reconnects_and_flows() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -545,6 +550,7 @@ async fn decoded_frames_reach_the_frame_sink() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: Some(sink.clone()),
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -605,6 +611,7 @@ async fn chat_flows_both_ways_over_the_data_channel() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -709,6 +716,7 @@ async fn ice_restart_keeps_media_flowing() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -801,6 +809,7 @@ async fn replace_source_swaps_mid_stream() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: Some(sink.clone()),
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -876,6 +885,7 @@ async fn idle_then_replace_source_resumes_on_the_same_connection() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: Some(sink.clone()),
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })
@@ -960,6 +970,7 @@ async fn audio_head_follows_the_source_out_of_idle() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: Some(sink.clone()),
         native: None,
+        audio_samples: None,
         ice: empty_ice(),
         force_relay: false,
     })

@@ -60,6 +60,7 @@ async fn falls_back_when_the_viewer_cannot_decode_the_top_codecs() {
     let (playback, mut playback_events) = Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: IceConfiguration {
             expires_at: "2026-01-01T00:00:00Z".into(),
             ice_servers: vec![],

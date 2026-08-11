@@ -536,6 +536,7 @@ impl ViewerSession {
                 force_relay: self.force_relay,
                 frames: self.frames.clone(),
                 native: self.native,
+        audio_samples: None,
             })?;
             if let Some(surface) = playback.native_surface() {
                 let _ = self.updates.send(ViewerUpdate::NativeSurface(surface));

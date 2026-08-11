@@ -64,6 +64,7 @@ async fn answers_preserve_congestion_control_feedback() {
     let (playback, mut events) = match Playback::start(PlaybackConfig {
         frames: None,
         native: None,
+        audio_samples: None,
         ice: IceConfiguration {
             expires_at: "2026-01-01T00:00:00Z".into(),
             ice_servers: vec![],

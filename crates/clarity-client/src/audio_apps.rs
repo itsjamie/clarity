@@ -4,6 +4,16 @@
 
 use std::process::Command;
 
+/// Voice-chat applications kept out of a shared mix unless the presenter
+/// asks for them, so an ongoing call is never broadcast by accident. The
+/// default exclusion set for both the CLI and the desktop GUI.
+pub const DEFAULT_EXCLUDED: &[&str] = &["discord"];
+
+/// [`DEFAULT_EXCLUDED`] as the owned list the policy functions take.
+pub fn default_excluded() -> Vec<String> {
+    DEFAULT_EXCLUDED.iter().map(|name| (*name).to_owned()).collect()
+}
+
 /// One application playback stream currently live on the audio graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioApplication {
@@ -96,26 +106,45 @@ fn applications_in_dump(dump: &serde_json::Value) -> Vec<AudioApplication> {
 /// exclusion that matches nothing playing is an error, so a typo does not
 /// silently share the very audio the presenter meant to keep private.
 pub fn applications_except(excluded: &[String]) -> Result<Vec<AudioApplication>, AudioAppError> {
-    let dump = graph_snapshot()?;
-    let streams = playback_streams(&dump);
-    for name in excluded {
-        let needle = name.to_lowercase();
-        let matches = streams.iter().any(|stream| {
-            stream
-                .match_terms()
-                .any(|term| term.to_lowercase().contains(&needle))
-        });
-        if !matches {
-            let mut available: Vec<String> = streams
-                .iter()
-                .map(|stream| stream.application().display_name())
-                .collect();
-            available.sort();
-            available.dedup();
-            return Err(AudioAppError::NotFound {
-                name: name.clone(),
-                available,
+    applications_except_in(&graph_snapshot()?, excluded, MissingExclusion::Reject)
+}
+
+/// How [`applications_except_in`] treats an exclusion that matches no playing
+/// stream: `Reject` for names a person typed (a typo must not silently share
+/// the audio it was meant to remove), `Ignore` for built-in default
+/// exclusions (an idle voice app excludes nothing, and that is fine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingExclusion {
+    Reject,
+    Ignore,
+}
+
+fn applications_except_in(
+    dump: &serde_json::Value,
+    excluded: &[String],
+    missing: MissingExclusion,
+) -> Result<Vec<AudioApplication>, AudioAppError> {
+    let streams = playback_streams(dump);
+    if missing == MissingExclusion::Reject {
+        for name in excluded {
+            let needle = name.to_lowercase();
+            let matches = streams.iter().any(|stream| {
+                stream
+                    .match_terms()
+                    .any(|term| term.to_lowercase().contains(&needle))
             });
+            if !matches {
+                let mut available: Vec<String> = streams
+                    .iter()
+                    .map(|stream| stream.application().display_name())
+                    .collect();
+                available.sort();
+                available.dedup();
+                return Err(AudioAppError::NotFound {
+                    name: name.clone(),
+                    available,
+                });
+            }
         }
     }
     let kept: Vec<AudioApplication> = streams
@@ -131,6 +160,76 @@ pub fn applications_except(excluded: &[String]) -> Result<Vec<AudioApplication>,
         .map(|stream| stream.application())
         .collect();
     Ok(kept)
+}
+
+/// The audio decision for a share with no explicit audio choice, built so an
+/// excluded application can never be broadcast by accident:
+///
+/// - What is playing (minus exclusions) is captured per stream, never as the
+///   device monitor — an excluded app that starts playing mid-share is
+///   structurally unreachable, because only the snapshotted streams are
+///   tapped.
+/// - When nothing shareable is playing, or the graph cannot be read, the
+///   share carries no audio at all. The old behaviour fell back to the full
+///   monitor mix here, which is exactly how an idle-at-start voice app ended
+///   up audible the moment a call began.
+///
+/// The monitor mix is only ever an explicit choice (`--all-audio`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultAudioDecision {
+    /// Capture exactly these applications' streams.
+    Share(Vec<AudioApplication>),
+    /// Share without audio; the reason drives the presenter-facing warning.
+    NoAudio(NoAudioReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoAudioReason {
+    /// Only excluded applications are playing.
+    OnlyExcludedPlaying,
+    /// Nothing is playing audio at all.
+    NothingPlaying,
+    /// The audio graph could not be inspected, so exclusions cannot be
+    /// honoured; sharing the monitor anyway could leak the excluded app.
+    GraphUnreadable(String),
+}
+
+/// Decides the default-share audio against the live graph. See
+/// [`DefaultAudioDecision`] for the policy.
+pub fn default_audio_exclusion(excluded: &[String]) -> DefaultAudioDecision {
+    match graph_snapshot() {
+        Ok(dump) => decide_default_audio(&dump, excluded),
+        Err(error) => DefaultAudioDecision::NoAudio(NoAudioReason::GraphUnreadable(
+            error.to_string(),
+        )),
+    }
+}
+
+/// One watchdog poll: the stream targets the shared mix should hold right
+/// now under the exclusion policy. `None` when the graph is unreadable, so a
+/// transient `pw-dump` failure leaves the current mix alone instead of
+/// silencing it.
+pub fn excluded_mix_targets(excluded: &[String]) -> Option<Vec<String>> {
+    match default_audio_exclusion(excluded) {
+        DefaultAudioDecision::Share(kept) => {
+            Some(kept.iter().map(|app| app.serial.to_string()).collect())
+        }
+        DefaultAudioDecision::NoAudio(NoAudioReason::GraphUnreadable(_)) => None,
+        DefaultAudioDecision::NoAudio(_) => Some(Vec::new()),
+    }
+}
+
+fn decide_default_audio(dump: &serde_json::Value, excluded: &[String]) -> DefaultAudioDecision {
+    let all = playback_streams(dump);
+    let kept = applications_except_in(dump, excluded, MissingExclusion::Ignore)
+        .expect("Ignore never rejects");
+    if !kept.is_empty() {
+        DefaultAudioDecision::Share(kept)
+    } else if all.is_empty() {
+        DefaultAudioDecision::NoAudio(NoAudioReason::NothingPlaying)
+    } else {
+        DefaultAudioDecision::NoAudio(NoAudioReason::OnlyExcludedPlaying)
+    }
 }
 
 fn resolve_in_dump(
@@ -316,52 +415,103 @@ mod tests {
         ));
     }
 
-    fn applications_except_in_dump(
-        dump: &serde_json::Value,
-        excluded: &[String],
-    ) -> Result<Vec<AudioApplication>, AudioAppError> {
-        // Mirrors applications_except without the live pw-dump call.
-        let streams = playback_streams(dump);
-        for name in excluded {
-            let needle = name.to_lowercase();
-            if !streams.iter().any(|stream| {
-                stream
-                    .match_terms()
-                    .any(|term| term.to_lowercase().contains(&needle))
-            }) {
-                return Err(AudioAppError::NotFound {
-                    name: name.clone(),
-                    available: vec![],
-                });
+    /// The graph while the voice app is idle: Discord runs but plays nothing,
+    /// so it has no output stream — only the music does.
+    fn dump_without_discord_playing() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "type": "PipeWire:Interface:Node",
+                "info": { "props": {
+                    "media.class": "Stream/Output/Audio",
+                    "object.serial": 30001,
+                    "node.name": "spotify",
+                    "application.name": "Spotify",
+                    "application.process.binary": "spotify"
+                }}
             }
-        }
-        Ok(streams
-            .iter()
-            .filter(|stream| {
-                !excluded.iter().any(|name| {
-                    let needle = name.to_lowercase();
-                    stream
-                        .match_terms()
-                        .any(|term| term.to_lowercase().contains(&needle))
-                })
-            })
-            .map(|stream| stream.application())
-            .collect())
+        ])
     }
 
     #[test]
     fn excluding_an_app_keeps_the_rest() {
-        let kept = applications_except_in_dump(&dump(), &["discord".to_owned()]).expect("resolves");
+        let kept =
+            applications_except_in(&dump(), &["discord".to_owned()], MissingExclusion::Reject)
+                .expect("resolves");
         let names: Vec<String> = kept.iter().map(AudioApplication::display_name).collect();
         assert_eq!(names, ["Spotify"]);
     }
 
     #[test]
-    fn excluding_something_not_playing_is_an_error() {
+    fn excluding_something_not_playing_is_an_error_when_strict() {
         // Guards against a typo silently sharing the audio meant to be private.
         assert!(matches!(
-            applications_except_in_dump(&dump(), &["discrod".to_owned()]),
+            applications_except_in(&dump(), &["discrod".to_owned()], MissingExclusion::Reject),
             Err(AudioAppError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn lenient_exclusion_tolerates_an_idle_app() {
+        let kept = applications_except_in(
+            &dump_without_discord_playing(),
+            &["discord".to_owned()],
+            MissingExclusion::Ignore,
+        )
+        .expect("never rejects");
+        let names: Vec<String> = kept.iter().map(AudioApplication::display_name).collect();
+        assert_eq!(names, ["Spotify"]);
+    }
+
+    #[test]
+    fn default_excludes_a_playing_voice_app() {
+        let decision = decide_default_audio(&dump(), &["discord".to_owned()]);
+        let DefaultAudioDecision::Share(kept) = decision else {
+            panic!("music keeps the share audible");
+        };
+        let names: Vec<String> = kept.iter().map(AudioApplication::display_name).collect();
+        assert_eq!(names, ["Spotify"]);
+    }
+
+    /// The reported leak: Discord idle at share start used to fall back to
+    /// the full monitor mix, so a call starting mid-share was broadcast. The
+    /// default must capture the playing streams individually instead — a
+    /// later-starting excluded app is then structurally unreachable.
+    #[test]
+    fn default_never_falls_back_to_the_monitor_when_the_voice_app_is_idle() {
+        let decision =
+            decide_default_audio(&dump_without_discord_playing(), &["discord".to_owned()]);
+        let DefaultAudioDecision::Share(kept) = decision else {
+            panic!("playing music is shared per stream");
+        };
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].label, "Spotify");
+    }
+
+    #[test]
+    fn default_shares_no_audio_when_only_the_voice_app_plays() {
+        let voice_only = serde_json::json!([
+            {
+                "type": "PipeWire:Interface:Node",
+                "info": { "props": {
+                    "media.class": "Stream/Output/Audio",
+                    "object.serial": 22689,
+                    "node.name": "WEBRTC VoiceEngine",
+                    "application.name": "WEBRTC VoiceEngine",
+                    "application.process.binary": "Discord"
+                }}
+            }
+        ]);
+        assert_eq!(
+            decide_default_audio(&voice_only, &["discord".to_owned()]),
+            DefaultAudioDecision::NoAudio(NoAudioReason::OnlyExcludedPlaying)
+        );
+    }
+
+    #[test]
+    fn default_shares_no_audio_when_nothing_plays() {
+        assert_eq!(
+            decide_default_audio(&serde_json::json!([]), &["discord".to_owned()]),
+            DefaultAudioDecision::NoAudio(NoAudioReason::NothingPlaying)
+        );
     }
 }

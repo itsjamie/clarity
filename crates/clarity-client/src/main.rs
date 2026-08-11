@@ -94,9 +94,9 @@ enum Command {
         /// Display name attached to your chat messages.
         #[arg(long)]
         name: Option<String>,
-        /// Video codec. `auto` prefers hardware AV1, then H.264, then software
-        /// VP8; `h264` forces H.264 (widest browser support); `vp8` forces
-        /// software encoding.
+        /// Video codec preference. `auto` offers hardware AV1, H.265, and
+        /// H.264, then software VP9 and VP8, and each viewer takes the best
+        /// it can decode; a specific codec pins the offer to it alone.
         #[arg(long, value_enum, default_value_t = CodecArg::Auto)]
         codec: CodecArg,
         /// Per-viewer video bitrate ceiling in kilobits per second.
@@ -115,9 +115,10 @@ enum Command {
         #[arg(long, value_name = "NAME", num_args = 0..=1, conflicts_with_all = ["no_audio", "audio_except"])]
         audio_app: Option<Option<String>>,
         /// Share the system's audio with these applications removed (e.g.
-        /// "discord" to keep a voice call private). Repeatable. Mixes the
-        /// applications playing when sharing starts, minus these. Overrides
-        /// the default, which already excludes a voice-chat app.
+        /// "discord" to keep a voice call private). Repeatable. The shared
+        /// mix follows what is playing: applications that start later join
+        /// it, the excluded ones never do. Overrides the default, which
+        /// already excludes a voice-chat app this way.
         #[arg(long, value_name = "NAME", conflicts_with = "no_audio")]
         audio_except: Vec<String>,
         /// Share the full system mix, including the voice-chat app the
@@ -194,21 +195,28 @@ async fn main() -> anyhow::Result<()> {
             fps,
             force_relay,
         } => {
-            let audio = if no_audio {
-                AudioCapture::Disabled
+            let (audio, audio_exclude) = if no_audio {
+                (AudioCapture::Disabled, None)
             } else if all_audio || synthetic {
-                AudioCapture::SystemMix
+                (AudioCapture::SystemMix, None)
             } else if let Some(request) = audio_app {
                 let application = match request {
                     Some(name) => clarity_client::audio_apps::resolve_application(&name)?,
                     None => choose_audio_app()?,
                 };
                 info!(app = %application.display_name(), "sharing this application's audio");
-                AudioCapture::Streams {
-                    targets: vec![application.serial.to_string()],
-                }
+                (
+                    AudioCapture::Streams {
+                        targets: vec![application.serial.to_string()],
+                    },
+                    None,
+                )
             } else if !audio_except.is_empty() {
-                audio_mix_except(&audio_except)?
+                // Strict at start (a typo must not share the audio it meant
+                // to remove), then watched: the exclusion holds for the whole
+                // share, and applications that start playing later join the
+                // mix.
+                (audio_mix_except(&audio_except)?, Some(audio_except.clone()))
             } else {
                 // Keep a voice-chat app out of the shared mix by default.
                 default_audio()
@@ -244,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
                 MediaOptions {
                     source,
                     audio,
+                    audio_exclude,
                     video_codecs: codec.ranking(),
                     frame_rate: fps,
                     bitrate_kbps,
@@ -275,37 +284,52 @@ async fn main() -> anyhow::Result<()> {
 
 /// Voice-chat applications kept out of the shared mix unless the presenter
 /// asks for them, so an ongoing call is not broadcast by accident.
-const DEFAULT_AUDIO_EXCLUDE: &[&str] = &["discord"];
-
-/// The audio for a share with no explicit audio flag: the system mix with the
-/// default voice-chat app removed when it is playing. Audio discovery never
-/// fails the share — an unreadable graph or an absent voice app both fall back
-/// to the full system mix.
-fn default_audio() -> AudioCapture {
-    let excluded: Vec<String> = DEFAULT_AUDIO_EXCLUDE
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect();
-    match clarity_client::audio_apps::applications_except(&excluded) {
-        // A voice app is playing and other audio remains: mix the rest.
-        Ok(kept) if !kept.is_empty() => {
+/// The audio for a share with no explicit audio flag: the currently-playing
+/// applications' streams with the default voice-chat apps removed, kept
+/// current by the session's watchdog — applications that start playing later
+/// join the mix, and the excluded voice app stays out however late its call
+/// starts. Streams are captured individually, never as the device monitor;
+/// falling back to the monitor here is exactly how an idle-at-start Discord
+/// used to become audible the moment a call began. `--all-audio` is the
+/// explicit way to share the full monitor mix.
+fn default_audio() -> (AudioCapture, Option<Vec<String>>) {
+    use clarity_client::audio_apps::{
+        DefaultAudioDecision, NoAudioReason, default_audio_exclusion, default_excluded,
+    };
+    let excluded = default_excluded();
+    match default_audio_exclusion(&excluded) {
+        DefaultAudioDecision::Share(kept) => {
             info!(
-                excluded = %DEFAULT_AUDIO_EXCLUDE.join(", "),
-                "excluding voice-chat audio by default (use --all-audio to include it)"
+                sharing = %kept.iter().map(|app| app.display_name()).collect::<Vec<_>>().join(", "),
+                excluded = %excluded.join(", "),
+                "sharing the audio playing now, voice chat excluded (--all-audio shares everything)"
             );
-            AudioCapture::Streams {
-                targets: kept.iter().map(|app| app.serial.to_string()).collect(),
-            }
+            (
+                AudioCapture::Streams {
+                    targets: kept.iter().map(|app| app.serial.to_string()).collect(),
+                },
+                Some(excluded),
+            )
         }
-        // Only the voice app is playing: sharing its audio is exactly what the
-        // default avoids, so share the picture only.
-        Ok(_) => {
-            info!("only voice-chat audio is playing; sharing without audio");
-            AudioCapture::Disabled
+        DefaultAudioDecision::NoAudio(NoAudioReason::OnlyExcludedPlaying) => {
+            info!("only voice-chat audio is playing; sharing silence until something else plays");
+            (AudioCapture::Streams { targets: vec![] }, Some(excluded))
         }
-        // The voice app is not playing, or the graph could not be read: the
-        // full system mix is correct and stays future-proof.
-        Err(_) => AudioCapture::SystemMix,
+        DefaultAudioDecision::NoAudio(NoAudioReason::NothingPlaying) => {
+            info!(
+                "nothing is playing audio yet; whatever plays next is shared \
+                 (voice chat stays excluded; --all-audio shares everything)"
+            );
+            (AudioCapture::Streams { targets: vec![] }, Some(excluded))
+        }
+        DefaultAudioDecision::NoAudio(NoAudioReason::GraphUnreadable(reason)) => {
+            warn!(
+                %reason,
+                "the audio graph is unreadable, so voice chat cannot be excluded; \
+                 sharing without audio (--all-audio shares everything unconditionally)"
+            );
+            (AudioCapture::Disabled, None)
+        }
     }
 }
 
@@ -420,6 +444,7 @@ fn restore_token_path() -> Option<std::path::PathBuf> {
 struct MediaOptions {
     source: Option<SourceConfig>,
     audio: AudioCapture,
+    audio_exclude: Option<Vec<String>>,
     video_codecs: Vec<VideoCodecId>,
     frame_rate: u32,
     bitrate_kbps: u32,
@@ -490,6 +515,7 @@ async fn present(
             origin: endpoints.origin,
             source: media.source,
             audio: media.audio,
+            audio_exclude: media.audio_exclude,
             video_codecs: media.video_codecs,
             frame_rate: media.frame_rate,
             capture_ceiling: None,

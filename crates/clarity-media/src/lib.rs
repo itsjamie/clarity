@@ -29,8 +29,8 @@ pub use broadcast::{
 pub use capture::{CaptureError, CaptureRequest, CaptureStream};
 pub use overlay::{NativeHandle, NativeVideoSurface};
 pub use playback::{
-    ConnectionState, FrameSink, IceState, Playback, PlaybackConfig, PlaybackError, PlaybackEvent,
-    VideoFrame,
+    AudioSampleSink, ConnectionState, FrameSink, IceState, Playback, PlaybackConfig, PlaybackError,
+    PlaybackEvent, VideoFrame,
 };
 pub use stats::{SenderStats, StreamStats};
 pub use teardown::drain_teardowns;

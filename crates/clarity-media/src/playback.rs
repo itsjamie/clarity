@@ -42,7 +42,15 @@ pub struct PlaybackConfig {
     /// bypassing the texture path. Takes precedence over `frames` when the
     /// overlay can be built; on any failure `frames` is the fallback.
     pub native: Option<NativeHandle>,
+    /// Where to deliver decoded audio samples (mono f32 at 48 kHz) instead of
+    /// an audio device. A test hook: content assertions (is a given tone in
+    /// the mix?) read the slot. `None` plays audio normally.
+    pub audio_samples: Option<AudioSampleSink>,
 }
+
+/// Accumulated decoded audio samples, appended per buffer; the writer caps
+/// growth so an unread slot cannot grow without bound.
+pub type AudioSampleSink = std::sync::Arc<Mutex<Vec<f32>>>;
 
 /// State of the connection to the presenter, in WebRTC peer-connection terms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +152,8 @@ struct Shared {
     stats_baseline: Mutex<Option<StatsBaseline>>,
     /// Decoded frames are written here when set; otherwise video opens a window.
     frames: Option<FrameSink>,
+    /// Decoded audio samples land here when set; otherwise audio plays.
+    audio_samples: Option<AudioSampleSink>,
     /// The native Wayland overlay, when one was requested and could be built.
     /// Video renders through its sink in preference to `frames`.
     native: Option<Arc<NativeVideoSurface>>,
@@ -201,6 +211,7 @@ impl Playback {
             desired_volume: Mutex::new(1.0),
             stats_baseline: Mutex::new(None),
             frames: config.frames.clone(),
+            audio_samples: config.audio_samples.clone(),
             native,
             chat_channel: Mutex::new(None),
             queued_chat: Mutex::new(Vec::new()),
@@ -667,23 +678,34 @@ fn attach_sink(
                 .collect::<Result<_, _>>()?,
         }
     } else if media.name().starts_with("audio/") {
-        let chain = [
-            "queue",
-            "audioconvert",
-            "audioresample",
-            "volume",
-            audio_sink_name(),
-        ]
-        .into_iter()
-        .map(build_element)
-        .collect::<Result<Vec<_>, _>>()?;
-        let volume = chain[3].clone();
-        volume.set_property(
-            "volume",
-            *shared.desired_volume.lock().expect("volume lock"),
-        );
-        *shared.volume_element.lock().expect("volume lock") = Some(volume);
-        chain
+        if let Some(samples) = &shared.audio_samples {
+            // The content-assertion tap: decoded audio, normalized to mono
+            // f32 at 48 kHz, accumulates in the slot instead of playing.
+            vec![
+                build_element("queue")?,
+                build_element("audioconvert")?,
+                build_element("audioresample")?,
+                audio_sample_appsink(samples.clone())?,
+            ]
+        } else {
+            let chain = [
+                "queue",
+                "audioconvert",
+                "audioresample",
+                "volume",
+                audio_sink_name(),
+            ]
+            .into_iter()
+            .map(build_element)
+            .collect::<Result<Vec<_>, _>>()?;
+            let volume = chain[3].clone();
+            volume.set_property(
+                "volume",
+                *shared.desired_volume.lock().expect("volume lock"),
+            );
+            *shared.volume_element.lock().expect("volume lock") = Some(volume);
+            chain
+        }
     } else {
         return Ok(());
     };
@@ -715,6 +737,42 @@ fn build_element(name: &'static str) -> Result<gst::Element, String> {
 /// An `appsink` that converts each frame to RGBA and stores the latest one in
 /// `sink`, keeping only the newest so a slow UI never backs the pipeline up.
 /// Shared with the broadcast's presenter self-preview branch.
+/// The audio counterpart of [`frame_appsink`]: accumulates decoded samples as
+/// mono f32 at 48 kHz, capped at thirty seconds so an unread slot stays
+/// bounded.
+fn audio_sample_appsink(sink: AudioSampleSink) -> Result<gst::Element, String> {
+    const CAP_SAMPLES: usize = 48_000 * 30;
+    let appsink = gst::ElementFactory::make("appsink")
+        .build()
+        .map_err(|_| "the media component `appsink` is unavailable".to_owned())?;
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
+        .field("rate", 48_000)
+        .field("channels", 1)
+        .build();
+    appsink.set_property("caps", &caps);
+    appsink.set_property("emit-signals", true);
+    appsink.set_property("sync", false);
+    appsink.connect("new-sample", false, move |values| {
+        let this = values[0].get::<gst::Element>().ok()?;
+        let sample = this.emit_by_name::<gst::Sample>("pull-sample", &[]);
+        if let Some(buffer) = sample.buffer()
+            && let Ok(map) = buffer.map_readable()
+        {
+            let mut samples = sink.lock().expect("audio sample lock");
+            if samples.len() < CAP_SAMPLES {
+                samples.extend(
+                    map.as_slice()
+                        .chunks_exact(4)
+                        .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+                );
+            }
+        }
+        Some(gst::FlowReturn::Ok.to_value())
+    });
+    Ok(appsink)
+}
+
 pub(crate) fn frame_appsink(sink: FrameSink) -> Result<gst::Element, String> {
     let appsink = gst::ElementFactory::make("appsink")
         .build()

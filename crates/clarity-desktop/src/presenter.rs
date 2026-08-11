@@ -368,11 +368,18 @@ async fn run(
             signaling_url: endpoints.signaling_url,
             origin: endpoints.origin,
             source,
+            // System audio is the watched per-stream mix, never the raw
+            // monitor: the watchdog fills it within half a second and keeps
+            // the default voice-chat exclusion out of it for the whole
+            // share, however late a call starts.
             audio: if config.include_system_audio {
-                AudioCapture::SystemMix
+                AudioCapture::Streams { targets: vec![] }
             } else {
                 AudioCapture::Disabled
             },
+            audio_exclude: config
+                .include_system_audio
+                .then(clarity_client::audio_apps::default_excluded),
             video_codecs: config.video_codecs.clone(),
             frame_rate: config.profile.fps(),
             capture_ceiling: Some(config.max_capture),

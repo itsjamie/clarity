@@ -550,6 +550,13 @@ pub struct Broadcast {
     /// What the audio head captures when a source is live, rebuilt on every
     /// source swap.
     audio_config: AudioCapture,
+    /// The reconcilable mixer state while a per-stream head is live; `None`
+    /// while idle, for monitor capture, or without audio.
+    audio_mix: Mutex<Option<AudioMixState>>,
+    /// The most recently requested stream targets, applied to the head on
+    /// every rebuild so a swap back from idle resumes the current mix, not
+    /// the one from start.
+    audio_targets: Mutex<Vec<String>>,
 }
 
 /// Which audio head accompanies the current video source. The idle
@@ -587,6 +594,21 @@ struct Shared {
     force_relay: bool,
     paused: AtomicBool,
     ended: AtomicBool,
+    /// Names of elements inside removable audio legs. A pipeline error from
+    /// one of these (an application stream vanishing mid-share) downgrades
+    /// that leg instead of ending the broadcast; the next reconcile removes
+    /// it.
+    audio_leg_names: Mutex<std::collections::HashSet<String>>,
+}
+
+/// Registers a mix's leg elements for bus-error containment.
+fn register_leg_names(shared: &Arc<Shared>, mix: &AudioMixState) {
+    let mut names = shared.audio_leg_names.lock().expect("leg name lock");
+    for leg in mix.legs.values() {
+        for element in leg {
+            names.insert(element.name().to_string());
+        }
+    }
 }
 
 impl Shared {
@@ -687,6 +709,7 @@ impl Broadcast {
             force_relay: config.force_relay,
             paused: AtomicBool::new(false),
             ended: AtomicBool::new(false),
+            audio_leg_names: Mutex::new(std::collections::HashSet::new()),
         });
 
         let pipeline = gst::Pipeline::new();
@@ -810,9 +833,21 @@ impl Broadcast {
                 None
             }
         };
-        let (audio_tee, audio_head, audio_tail_input) = match audio_chain {
-            Some(chain) => (Some(chain.tee), chain.head, Some(chain.tail_input)),
-            None => (None, Vec::new(), None),
+        let (audio_tee, audio_head, audio_tail_input, audio_mix) = match audio_chain {
+            Some(chain) => (
+                Some(chain.tee),
+                chain.head,
+                Some(chain.tail_input),
+                chain.mix,
+            ),
+            None => (None, Vec::new(), None, None),
+        };
+        if let Some(mix) = &audio_mix {
+            register_leg_names(&shared, mix);
+        }
+        let audio_targets = match &config.audio {
+            AudioCapture::Streams { targets } => targets.clone(),
+            _ => Vec::new(),
         };
 
         pipeline
@@ -838,6 +873,8 @@ impl Broadcast {
                 audio_head: Mutex::new(audio_head),
                 audio_tail_input,
                 audio_config: config.audio,
+                audio_mix: Mutex::new(audio_mix),
+                audio_targets: Mutex::new(audio_targets),
             },
             receiver,
         ))
@@ -919,6 +956,14 @@ impl Broadcast {
         };
         let mut head = self.audio_head.lock().expect("audio head lock");
         let old_head = std::mem::take(&mut *head);
+        // The old mix (if any) is dismantled with the head; its legs stop
+        // being containment-tracked.
+        *self.audio_mix.lock().expect("audio mix lock") = None;
+        self.shared
+            .audio_leg_names
+            .lock()
+            .expect("leg name lock")
+            .clear();
         if let Some(head_src) = old_head.last().and_then(|element| element.static_pad("src")) {
             // Same parking dance as the video head: the streaming thread must
             // be off the tail before anything is unlinked.
@@ -939,12 +984,20 @@ impl Broadcast {
         }
         let _ = self.pipeline.remove_many(&old_head);
 
-        let attach = |mode: AudioHeadMode| -> Result<Vec<gst::Element>, String> {
-            let elements = build_audio_head(&self.pipeline, &self.audio_config, mode)?;
+        // A per-stream head rebuilds against the CURRENT targets, so a swap
+        // back from idle resumes the reconciled mix, not the one from start.
+        let audio_config = match &self.audio_config {
+            AudioCapture::Streams { .. } => AudioCapture::Streams {
+                targets: self.audio_targets.lock().expect("audio target lock").clone(),
+            },
+            other => other.clone(),
+        };
+        let attach = |mode: AudioHeadMode| -> Result<BuiltAudioHead, String> {
+            let built = build_audio_head(&self.pipeline, &audio_config, mode)?;
             let result = (|| {
-                let output = elements.last().ok_or("the audio head is empty")?;
+                let output = built.elements.last().ok_or("the audio head is empty")?;
                 output.link(tail_input).map_err(|error| error.to_string())?;
-                for element in elements.iter().rev() {
+                for element in built.elements.iter().rev() {
                     element
                         .sync_state_with_parent()
                         .map_err(|error| error.to_string())?;
@@ -952,12 +1005,12 @@ impl Broadcast {
                 Ok(())
             })();
             match result {
-                Ok(()) => Ok(elements),
+                Ok(()) => Ok(built),
                 Err(reason) => {
-                    for element in elements.iter().rev() {
+                    for element in built.elements.iter().rev() {
                         let _ = element.set_state(gst::State::Null);
                     }
-                    let _ = self.pipeline.remove_many(&elements);
+                    let _ = self.pipeline.remove_many(&built.elements);
                     Err(reason)
                 }
             }
@@ -966,11 +1019,105 @@ impl Broadcast {
             tracing::warn!(%reason, "audio capture unavailable; sending silence");
             attach(AudioHeadMode::Idle)
         }) {
-            Ok(elements) => *head = elements,
+            Ok(built) => {
+                *head = built.elements;
+                if let Some(mix) = &built.mix {
+                    register_leg_names(&self.shared, mix);
+                }
+                *self.audio_mix.lock().expect("audio mix lock") = built.mix;
+            }
             Err(reason) => {
                 // No head at all: the tail runs starved and viewers get
                 // silence. Nothing to dismantle later.
                 tracing::warn!(%reason, "the audio head could not be rebuilt; audio is silent");
+            }
+        }
+    }
+
+    /// Reconciles the live per-stream audio mix against `targets`: legs for
+    /// new targets are added, legs whose target is gone are dismantled, and
+    /// the rest keep flowing. The requested set also becomes the mix a
+    /// return from idle rebuilds. On a broadcast without a per-stream mix
+    /// (no audio, monitor capture, or currently idle) only the stored
+    /// targets change. This is the mechanism behind the presenter's audio
+    /// watchdog: the excluded application stays out of the mix however late
+    /// it starts playing, and applications that begin playing mid-share
+    /// become audible without renegotiation.
+    pub fn set_audio_streams(&self, targets: &[String]) {
+        *self.audio_targets.lock().expect("audio target lock") = targets.to_vec();
+        let mut mix = self.audio_mix.lock().expect("audio mix lock");
+        let Some(mix) = mix.as_mut() else {
+            return;
+        };
+        let head_holds = |head: &mut Vec<gst::Element>, leg: &[gst::Element], keep: bool| {
+            if keep {
+                head.extend(leg.iter().cloned());
+            } else {
+                head.retain(|element| !leg.contains(element));
+            }
+        };
+        let mut head = self.audio_head.lock().expect("audio head lock");
+
+        let stale: Vec<String> = mix
+            .legs
+            .keys()
+            .filter(|target| !targets.contains(target))
+            .cloned()
+            .collect();
+        for target in stale {
+            let Some(leg) = mix.legs.remove(&target) else {
+                continue;
+            };
+            {
+                let mut names = self.shared.audio_leg_names.lock().expect("leg name lock");
+                for element in &leg {
+                    names.remove(element.name().as_str());
+                }
+            }
+            // Park the leg's streaming thread at its output, exactly as
+            // `replace_source` parks the capture head, then release the
+            // mixer pad and dismantle downstream-first (flushing the probed
+            // pad frees the parked thread so the source can stop).
+            if let Some(leg_src) = leg.last().and_then(|element| element.static_pad("src")) {
+                let (parked, wait_parked) = std::sync::mpsc::channel::<()>();
+                leg_src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
+                    let _ = parked.send(());
+                    gst::PadProbeReturn::Ok
+                });
+                let _ = wait_parked.recv_timeout(Duration::from_secs(1));
+                if let Some(peer) = leg_src.peer() {
+                    let _ = leg_src.unlink(&peer);
+                    mix.mixer.release_request_pad(&peer);
+                }
+            }
+            for element in leg.iter().rev() {
+                let _ = element.set_state(gst::State::Null);
+            }
+            let _ = self.pipeline.remove_many(&leg);
+            head_holds(&mut head, &leg, false);
+            tracing::info!(%target, "an audio stream left the shared mix");
+        }
+
+        for target in targets {
+            if mix.legs.contains_key(target) {
+                continue;
+            }
+            match build_stream_leg(&self.pipeline, &mix.mixer, target) {
+                Ok(leg) => {
+                    {
+                        let mut names =
+                            self.shared.audio_leg_names.lock().expect("leg name lock");
+                        for element in &leg {
+                            names.insert(element.name().to_string());
+                        }
+                    }
+                    head_holds(&mut head, &leg, true);
+                    mix.legs.insert(target.clone(), leg);
+                    tracing::info!(%target, "an audio stream joined the shared mix");
+                }
+                Err(reason) => {
+                    tracing::warn!(%target, %reason, "an audio stream could not join the mix");
+                }
             }
         }
     }
@@ -2043,6 +2190,24 @@ fn spawn_bus_thread(
                     use gst::MessageView;
                     match message.view() {
                         MessageView::Error(error) => {
+                            // An error from inside a removable audio leg (an
+                            // application stream dying mid-share) downgrades
+                            // that leg; the next reconcile removes it. Only
+                            // errors from the pipeline proper end the share.
+                            let from_leg = message.src().is_some_and(|src| {
+                                shared
+                                    .audio_leg_names
+                                    .lock()
+                                    .expect("leg name lock")
+                                    .contains(src.name().as_str())
+                            });
+                            if from_leg {
+                                tracing::warn!(
+                                    error = %error.error(),
+                                    "an audio stream failed; its audio drops from the mix"
+                                );
+                                continue;
+                            }
                             end(
                                 &shared,
                                 &format!(
@@ -2286,6 +2451,8 @@ struct AudioChain {
     tee: gst::Element,
     head: Vec<gst::Element>,
     tail_input: gst::Element,
+    /// The reconcilable mixer state when the head is the per-stream mix.
+    mix: Option<AudioMixState>,
 }
 
 fn build_audio_chain(
@@ -2296,19 +2463,16 @@ fn build_audio_chain(
     if matches!(audio, AudioCapture::Disabled) {
         return Ok(None);
     }
-    if let AudioCapture::Streams { targets } = audio
-        && targets.is_empty()
-    {
-        return Err("no application audio streams were available to capture".to_owned());
-    }
     for element in ["opusenc", "rtpopuspay"] {
         if gst::ElementFactory::find(element).is_none() {
             return Err(format!("the audio component `{element}` is unavailable"));
         }
     }
     // Head elements whose last member's src pad carries the captured audio: a
-    // single source directly, or an audiomixer summing several tapped streams.
-    let head = build_audio_head(pipeline, audio, mode)?;
+    // single source directly, or the reconcilable mixer skeleton for
+    // per-application streams.
+    let built = build_audio_head(pipeline, audio, mode)?;
+    let head = built.elements;
     let convert = make_audio("audioconvert")?;
     let resample = make_audio("audioresample")?;
     let normalize = gst::ElementFactory::make("capsfilter")
@@ -2338,7 +2502,32 @@ fn build_audio_chain(
         tee,
         head,
         tail_input: tail[0].clone(),
+        mix: built.mix,
     }))
+}
+
+/// What building an audio head produced: every element added (output last),
+/// plus the mixer state when the head is the reconcilable per-stream mix.
+struct BuiltAudioHead {
+    elements: Vec<gst::Element>,
+    mix: Option<AudioMixState>,
+}
+
+impl BuiltAudioHead {
+    fn plain(elements: Vec<gst::Element>) -> Self {
+        Self {
+            elements,
+            mix: None,
+        }
+    }
+}
+
+/// The live per-stream mix: a permanent silent leg keeps the mixer producing
+/// regardless of how many application legs exist, and each tapped stream is
+/// one removable leg keyed by its PipeWire target.
+struct AudioMixState {
+    mixer: gst::Element,
+    legs: std::collections::HashMap<String, Vec<gst::Element>>,
 }
 
 fn make_audio(name: &'static str) -> Result<gst::Element, String> {
@@ -2351,11 +2540,22 @@ fn make_audio(name: &'static str) -> Result<gst::Element, String> {
 /// returning them with the output element last. While idle every variant is
 /// a silent placeholder: no audio device or application stream is tapped at
 /// all when nothing is being shared.
+/// The one audio format every mixer input is normalized to; `audiomixer`
+/// requires identical caps on all of its sink pads.
+fn mix_caps() -> gst::Caps {
+    gst::Caps::builder("audio/x-raw")
+        .field("format", "F32LE")
+        .field("layout", "interleaved")
+        .field("rate", 48_000)
+        .field("channels", 2)
+        .build()
+}
+
 fn build_audio_head(
     pipeline: &gst::Pipeline,
     audio: &AudioCapture,
     mode: AudioHeadMode,
-) -> Result<Vec<gst::Element>, String> {
+) -> Result<BuiltAudioHead, String> {
     if mode == AudioHeadMode::Idle {
         let source = gst::ElementFactory::make("audiotestsrc")
             .property("is-live", true)
@@ -2363,7 +2563,7 @@ fn build_audio_head(
             .build()
             .map_err(|error| error.to_string())?;
         pipeline.add(&source).map_err(|error| error.to_string())?;
-        return Ok(vec![source]);
+        return Ok(BuiltAudioHead::plain(vec![source]));
     }
     match audio {
         AudioCapture::Disabled => unreachable!("handled by the caller"),
@@ -2375,7 +2575,7 @@ fn build_audio_head(
                 .build()
                 .map_err(|error| error.to_string())?;
             pipeline.add(&source).map_err(|error| error.to_string())?;
-            Ok(vec![source])
+            Ok(BuiltAudioHead::plain(vec![source]))
         }
         AudioCapture::SystemMix => {
             // The synthetic source's soft development tone: audible proof the
@@ -2387,48 +2587,98 @@ fn build_audio_head(
                 .build()
                 .map_err(|error| error.to_string())?;
             pipeline.add(&source).map_err(|error| error.to_string())?;
-            Ok(vec![source])
+            Ok(BuiltAudioHead::plain(vec![source]))
         }
-        AudioCapture::Streams { targets } if targets.len() == 1 => {
-            let source = application_source(&targets[0])?;
-            pipeline.add(&source).map_err(|error| error.to_string())?;
-            Ok(vec![source])
-        }
-        AudioCapture::Streams { targets } => {
-            let mixer = gst::ElementFactory::make("audiomixer")
-                .build()
-                .map_err(|_| "the audio component `audiomixer` is unavailable".to_owned())?;
-            pipeline.add(&mixer).map_err(|error| error.to_string())?;
-            let mut elements = Vec::with_capacity(targets.len() * 4 + 1);
-            // Each tapped stream is converted to a common rate and channel
-            // layout before the mixer, which requires matching input caps.
-            for target in targets {
-                let source = application_source(target)?;
-                let convert = make_audio("audioconvert")?;
-                let resample = make_audio("audioresample")?;
-                let caps = gst::ElementFactory::make("capsfilter")
-                    .property(
-                        "caps",
-                        gst::Caps::builder("audio/x-raw")
-                            .field("rate", 48_000)
-                            .field("channels", 2)
-                            .build(),
-                    )
-                    .build()
-                    .map_err(|error| error.to_string())?;
-                let leg = [source, convert, resample, caps];
-                pipeline.add_many(&leg).map_err(|error| error.to_string())?;
-                gst::Element::link_many(&leg).map_err(|error| error.to_string())?;
-                leg[leg.len() - 1]
-                    .link(&mixer)
-                    .map_err(|error| error.to_string())?;
-                elements.extend(leg);
+        AudioCapture::Streams { targets } => build_stream_mix(pipeline, targets),
+    }
+}
+
+/// The reconcilable per-stream mix: silence + mixer as a permanent skeleton
+/// (the mixer always produces, however many legs exist), one leg per target.
+/// A leg that cannot be built is skipped with a warning — audio downgrades,
+/// it never fails the share — and [`Broadcast::set_audio_streams`] adds and
+/// removes legs while streaming.
+fn build_stream_mix(
+    pipeline: &gst::Pipeline,
+    targets: &[String],
+) -> Result<BuiltAudioHead, String> {
+    let mixer = gst::ElementFactory::make("audiomixer")
+        .build()
+        .map_err(|_| "the audio component `audiomixer` is unavailable".to_owned())?;
+    pipeline.add(&mixer).map_err(|error| error.to_string())?;
+    let silence_source = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property_from_str("wave", "silence")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let silence_caps = gst::ElementFactory::make("capsfilter")
+        .property("caps", mix_caps())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let silence = [silence_source, silence_caps];
+    pipeline
+        .add_many(&silence)
+        .map_err(|error| error.to_string())?;
+    gst::Element::link_many(&silence).map_err(|error| error.to_string())?;
+    silence[1].link(&mixer).map_err(|error| error.to_string())?;
+
+    let mut elements: Vec<gst::Element> = silence.to_vec();
+    let mut legs = std::collections::HashMap::new();
+    for target in targets {
+        match build_stream_leg(pipeline, &mixer, target) {
+            Ok(leg) => {
+                elements.extend(leg.iter().cloned());
+                legs.insert(target.clone(), leg);
             }
-            // The mixer is the head's output and must stay last.
-            elements.push(mixer);
-            Ok(elements)
+            Err(reason) => {
+                tracing::warn!(%target, %reason, "an audio stream could not be tapped; skipping it");
+            }
         }
     }
+    // The mixer is the head's output and must stay last.
+    elements.push(mixer.clone());
+    Ok(BuiltAudioHead {
+        elements,
+        mix: Some(AudioMixState { mixer, legs }),
+    })
+}
+
+/// One application leg, linked into the mixer and playing: pipewiresrc for
+/// the target, normalized to the mix format.
+fn build_stream_leg(
+    pipeline: &gst::Pipeline,
+    mixer: &gst::Element,
+    target: &str,
+) -> Result<Vec<gst::Element>, String> {
+    let source = application_source(target)?;
+    let convert = make_audio("audioconvert")?;
+    let resample = make_audio("audioresample")?;
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property("caps", mix_caps())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let leg = vec![source, convert, resample, caps];
+    pipeline.add_many(&leg).map_err(|error| error.to_string())?;
+    gst::Element::link_many(&leg).map_err(|error| error.to_string())?;
+    let result = (|| {
+        leg[leg.len() - 1]
+            .link(mixer)
+            .map_err(|error| error.to_string())?;
+        for element in leg.iter().rev() {
+            element
+                .sync_state_with_parent()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })();
+    if let Err(reason) = result {
+        for element in leg.iter().rev() {
+            let _ = element.set_state(gst::State::Null);
+        }
+        let _ = pipeline.remove_many(&leg);
+        return Err(reason);
+    }
+    Ok(leg)
 }
 
 fn application_source(target_object: &str) -> Result<gst::Element, String> {

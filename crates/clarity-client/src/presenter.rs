@@ -39,6 +39,13 @@ pub struct PresenterSessionConfig {
     /// What sound accompanies the picture; an uncapturable audio source
     /// downgrades to video-only with a log line rather than failing.
     pub audio: AudioCapture,
+    /// When set, a watchdog polls the audio graph twice a second and
+    /// reconciles the shared per-stream mix: applications that start playing
+    /// join it, applications that stop (or match an excluded name) leave it.
+    /// This is what keeps an excluded voice app inaudible even when its call
+    /// starts long after sharing did. Only meaningful with
+    /// [`AudioCapture::Streams`].
+    pub audio_exclude: Option<Vec<String>>,
     /// Ranked codec preference for the offer, best first; empty means the
     /// media engine's default order. Codecs without an installed encoder are
     /// skipped.
@@ -189,6 +196,12 @@ pub struct PresenterSession {
     /// The presenter's self-preview sink, handed to the broadcast at start.
     preview_frames: Option<FrameSink>,
     audio: AudioCapture,
+    audio_exclude: Option<Vec<String>>,
+    /// Fires every 500 ms while the watchdog is configured.
+    audio_watch: Option<tokio::time::Interval>,
+    /// An in-flight watchdog poll of the audio graph; ticks are skipped
+    /// while one is pending so a wedged `pw-dump` cannot pile up tasks.
+    audio_probe: Option<tokio::task::JoinHandle<Option<Vec<String>>>>,
     video_codecs: Vec<VideoCodecId>,
     frame_rate: u32,
     capture_ceiling: Option<(u32, u32)>,
@@ -260,6 +273,13 @@ impl PresenterSession {
             source: config.source,
             preview_frames: config.preview_frames,
             audio: config.audio,
+            audio_watch: config.audio_exclude.as_ref().map(|_| {
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval
+            }),
+            audio_exclude: config.audio_exclude,
+            audio_probe: None,
             video_codecs: config.video_codecs,
             frame_rate: config.frame_rate,
             capture_ceiling: config.capture_ceiling,
@@ -307,7 +327,39 @@ impl PresenterSession {
                     None => std::future::pending().await,
                 }
             };
+            let audio_watch_due = async {
+                match &mut self.audio_watch {
+                    Some(interval) => {
+                        interval.tick().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let audio_probe_done = async {
+                match &mut self.audio_probe {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
+                () = audio_watch_due => {
+                    // Poll off-thread: pw-dump is a subprocess, and a wedged
+                    // audio graph must not stall signaling or chat.
+                    if self.audio_probe.is_none()
+                        && self.broadcast.is_some()
+                        && let Some(excluded) = self.audio_exclude.clone()
+                    {
+                        self.audio_probe = Some(tokio::task::spawn_blocking(move || {
+                            crate::audio_apps::excluded_mix_targets(&excluded)
+                        }));
+                    }
+                }
+                targets = audio_probe_done => {
+                    self.audio_probe = None;
+                    if let (Ok(Some(targets)), Some(broadcast)) = (targets, &self.broadcast) {
+                        broadcast.set_audio_streams(&targets);
+                    }
+                }
                 command = self.commands.recv() => {
                     // A dropped command handle leaves the room open; closing
                     // is always an explicit CloseRoom.
