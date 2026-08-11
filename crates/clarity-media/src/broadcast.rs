@@ -54,82 +54,162 @@ fn set_max_bitrate(encoder: &gst::Element, kbps: u32) {
     }
 }
 
-/// The presenter's video codec choice. `Auto` picks the best available codec,
-/// preferring quality (hardware AV1, then hardware H.264, then software VP8);
-/// the rest force a specific codec and fall back only if its encoder is absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VideoCodecPreference {
-    #[default]
-    Auto,
-    /// Hardware H.264 (NVENC) — the most widely decodable WebRTC video codec.
-    H264,
-    /// Hardware AV1 (NVENC) — best detail per bit; narrower browser support.
+/// A negotiable video codec, in the vocabulary rankings and settings use.
+/// The presenter offers every ranked codec its installation can encode; the
+/// viewer's answer picks the first it can decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodecId {
     Av1,
-    /// Software VP8 — universal but CPU-bound at high resolution.
+    H265,
+    H264,
+    Vp9,
     Vp8,
 }
 
-/// The resolved codec each viewer is encoded with. Hardware NVENC (H.264 or
-/// AV1) holds a steady CBR bitrate without CPU cost, which software VP8 cannot
-/// at high resolutions; VP8 is the fallback when no hardware encoder is present.
+impl VideoCodecId {
+    /// Every codec the engine knows, in the default preference order:
+    /// hardware first by quality per bit, software last.
+    pub const ALL: [Self; 5] = [Self::Av1, Self::H265, Self::H264, Self::Vp9, Self::Vp8];
+
+    /// The stable lowercase identifier settings persist.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Av1 => "av1",
+            Self::H265 => "h265",
+            Self::H264 => "h264",
+            Self::Vp9 => "vp9",
+            Self::Vp8 => "vp8",
+        }
+    }
+
+    /// The display label, matching the RTP encoding name.
+    pub fn label(self) -> &'static str {
+        VideoCodec::from_id(self).encoding_name()
+    }
+
+    /// Parses a persisted identifier; case-insensitive.
+    pub fn parse(id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|codec| codec.id().eq_ignore_ascii_case(id.trim()))
+    }
+}
+
+/// One row of [`video_codec_inventory`]: whether this installation can encode
+/// the codec, and whether that encoder is hardware. Settings UIs rank from
+/// this so the user sees what a choice costs.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoCodecCapability {
+    pub codec: VideoCodecId,
+    pub hardware: bool,
+    pub available: bool,
+}
+
+/// Probes the installed GStreamer elements for every codec the engine knows,
+/// in default preference order.
+pub fn video_codec_inventory() -> Vec<VideoCodecCapability> {
+    let _ = crate::playback::ensure_gstreamer();
+    VideoCodecId::ALL
+        .into_iter()
+        .map(|id| {
+            let codec = VideoCodec::from_id(id);
+            VideoCodecCapability {
+                codec: id,
+                hardware: codec.uses_nvenc(),
+                available: codec.is_available(),
+            }
+        })
+        .collect()
+}
+
+/// The codec a viewer branch encodes with. Hardware NVENC holds a steady
+/// bitrate without CPU cost, which the software encoders cannot at high
+/// resolutions; VP8 is the mandatory-to-implement safety net every WebRTC
+/// endpoint decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VideoCodec {
-    H264Nvenc,
     Av1Nvenc,
+    H265Nvenc,
+    H264Nvenc,
+    Vp9,
     Vp8,
 }
 
 impl VideoCodec {
-    /// Resolves a preference to the codec actually used, honoring the request
-    /// where its encoder is installed and falling back through H.264 to VP8.
-    fn select(preference: VideoCodecPreference) -> Self {
-        let candidates: &[Self] = match preference {
-            VideoCodecPreference::Vp8 => &[Self::Vp8],
-            VideoCodecPreference::Av1 | VideoCodecPreference::Auto => {
-                &[Self::Av1Nvenc, Self::H264Nvenc, Self::Vp8]
-            }
-            VideoCodecPreference::H264 => &[Self::H264Nvenc, Self::Vp8],
-        };
-        candidates
-            .iter()
-            .copied()
-            .find(|codec| {
-                codec
-                    .required_elements()
-                    .iter()
-                    .all(|name| gst::ElementFactory::find(name).is_some())
-            })
-            .unwrap_or(Self::Vp8)
+    fn from_id(id: VideoCodecId) -> Self {
+        match id {
+            VideoCodecId::Av1 => Self::Av1Nvenc,
+            VideoCodecId::H265 => Self::H265Nvenc,
+            VideoCodecId::H264 => Self::H264Nvenc,
+            VideoCodecId::Vp9 => Self::Vp9,
+            VideoCodecId::Vp8 => Self::Vp8,
+        }
     }
 
-    /// The display name reported in per-viewer stats.
-    fn label(self) -> &'static str {
+    /// Resolves the user's ranking (or the default order when empty) to the
+    /// codecs this installation can actually encode, preserving rank. The
+    /// result is what the offer advertises; it always contains at least VP8,
+    /// the codec every WebRTC endpoint must decode.
+    fn resolve_ranking(ranking: &[VideoCodecId]) -> Vec<Self> {
+        let ranked: Vec<Self> = if ranking.is_empty() {
+            VideoCodecId::ALL.iter().map(|id| Self::from_id(*id)).collect()
+        } else {
+            ranking.iter().map(|id| Self::from_id(*id)).collect()
+        };
+        let mut available: Vec<Self> = ranked
+            .into_iter()
+            .filter(|codec| codec.is_available())
+            .collect();
+        if available.is_empty() {
+            available.push(Self::Vp8);
+        }
+        available
+    }
+
+    fn is_available(self) -> bool {
+        self.required_elements()
+            .iter()
+            .all(|name| gst::ElementFactory::find(name).is_some())
+    }
+
+    /// The RTP encoding name, doubling as the display name in stats.
+    fn encoding_name(self) -> &'static str {
         match self {
-            Self::H264Nvenc => "H264",
             Self::Av1Nvenc => "AV1",
+            Self::H265Nvenc => "H265",
+            Self::H264Nvenc => "H264",
+            Self::Vp9 => "VP9",
             Self::Vp8 => "VP8",
         }
     }
 
+    /// The display name reported in per-viewer stats.
+    fn label(self) -> &'static str {
+        self.encoding_name()
+    }
+
     fn required_elements(self) -> &'static [&'static str] {
         match self {
-            Self::H264Nvenc => &["nvh264enc", "h264parse", "rtph264pay"],
             Self::Av1Nvenc => &["nvav1enc", "av1parse", "rtpav1pay"],
+            Self::H265Nvenc => &["nvh265enc", "h265parse", "rtph265pay"],
+            Self::H264Nvenc => &["nvh264enc", "h264parse", "rtph264pay"],
+            Self::Vp9 => &["vp9enc", "rtpvp9pay"],
             Self::Vp8 => &["vp8enc", "rtpvp8pay"],
         }
     }
 
-    /// The raw pixel format the encoder consumes, produced once in the shared
-    /// path so per-viewer branches convert nothing.
+    /// The raw pixel format the encoder consumes. The shared path normalizes
+    /// to the top-ranked codec's format; a branch whose negotiated codec
+    /// wants another format converts locally.
     fn raw_format(self) -> &'static str {
         match self {
-            Self::H264Nvenc | Self::Av1Nvenc => "NV12",
-            Self::Vp8 => "I420",
+            Self::Av1Nvenc | Self::H265Nvenc | Self::H264Nvenc => "NV12",
+            Self::Vp9 | Self::Vp8 => "I420",
         }
     }
 
     fn uses_nvenc(self) -> bool {
-        matches!(self, Self::H264Nvenc | Self::Av1Nvenc)
+        matches!(self, Self::Av1Nvenc | Self::H265Nvenc | Self::H264Nvenc)
     }
 
     /// Applies an average target and a peak (VBR cap), translating to each
@@ -147,10 +227,35 @@ impl VideoCodec {
         }
     }
 
+    /// The `application/x-rtp` structure advertising this codec at `pt`, as
+    /// used both in the branch's capsfilter and in the transceiver's
+    /// codec-preferences that make the offer multi-codec.
+    fn rtp_structure(self, pt: u32) -> gst::Structure {
+        let mut structure = gst::Structure::builder("application/x-rtp")
+            .field("media", "video")
+            .field("encoding-name", self.encoding_name())
+            .field("clock-rate", 90_000)
+            .field("payload", i32::try_from(pt).unwrap_or(96))
+            .field("rtcp-fb-nack-pli", true);
+        // The transport-wide congestion control extension carries the feedback
+        // the GCC estimator consumes; without the local element the offer stays
+        // honest and adaptation simply never engages.
+        if gst::ElementFactory::find("rtphdrexttwcc").is_some() {
+            structure = structure
+                .field("rtcp-fb-transport-cc", true)
+                .field("extmap-3", TWCC_EXTENSION_URI);
+        }
+        structure.build()
+    }
+
     /// Builds the encode-to-RTP chain (encoder … capsfilter) and returns it
     /// with the encoder element for live bitrate control. The per-viewer branch
     /// links queue → valve into the first element and the last into webrtcbin.
-    fn build_encode(self, initial_kbps: u32) -> Result<(Vec<gst::Element>, gst::Element), String> {
+    fn build_encode(
+        self,
+        initial_kbps: u32,
+        pt: u32,
+    ) -> Result<(Vec<gst::Element>, gst::Element), String> {
         let make = |name: &str| {
             gst::ElementFactory::make(name)
                 .build()
@@ -168,7 +273,20 @@ impl VideoCodec {
             encoder.set_property("bitrate", initial_kbps);
             set_max_bitrate(encoder, initial_kbps);
         };
-        let (encoder, middle, encoding_name): (gst::Element, Vec<gst::Element>, &str) = match self {
+        // Realtime software encoding, shared by VP8 and VP9: deadline=1
+        // selects realtime mode; PLI keyframes arrive as upstream
+        // force-keyunit events.
+        let configure_vpx = |encoder: &gst::Element| {
+            encoder.set_property("deadline", 1i64);
+            encoder.set_property_from_str("end-usage", "cbr");
+            encoder.set_property(
+                "target-bitrate",
+                i32::try_from(initial_kbps.saturating_mul(1000)).unwrap_or(i32::MAX),
+            );
+            encoder.set_property("cpu-used", 8i32);
+            encoder.set_property("threads", 4i32);
+        };
+        let (encoder, middle): (gst::Element, Vec<gst::Element>) = match self {
             Self::H264Nvenc => {
                 let encoder = make("nvh264enc")?;
                 configure_nvenc(&encoder);
@@ -186,55 +304,69 @@ impl VideoCodec {
                 let parse = make("h264parse")?;
                 parse.set_property("config-interval", -1i32);
                 let pay = make("rtph264pay")?;
-                pay.set_property("pt", 96u32);
+                pay.set_property("pt", pt);
                 // Repeat SPS/PPS on every keyframe so a viewer that joins or
                 // recovers mid-stream can start decoding without waiting.
                 pay.set_property("config-interval", -1i32);
                 pay.set_property_from_str("aggregate-mode", "zero-latency");
-                (encoder, vec![profile, parse, pay], "H264")
+                (encoder, vec![profile, parse, pay])
+            }
+            Self::H265Nvenc => {
+                let encoder = make("nvh265enc")?;
+                configure_nvenc(&encoder);
+                // Main profile is the widest H.265 decode support (Safari's
+                // hardware path included); parse/payloader repeat VPS/SPS/PPS
+                // on keyframes for mid-stream joins, as with H.264.
+                let profile = gst::ElementFactory::make("capsfilter")
+                    .property(
+                        "caps",
+                        gst::Caps::builder("video/x-h265")
+                            .field("profile", "main")
+                            .build(),
+                    )
+                    .build()
+                    .map_err(|_| "`capsfilter` is unavailable".to_owned())?;
+                let parse = make("h265parse")?;
+                parse.set_property("config-interval", -1i32);
+                let pay = make("rtph265pay")?;
+                pay.set_property("pt", pt);
+                pay.set_property("config-interval", -1i32);
+                pay.set_property_from_str("aggregate-mode", "zero-latency");
+                (encoder, vec![profile, parse, pay])
             }
             Self::Av1Nvenc => {
                 let encoder = make("nvav1enc")?;
                 configure_nvenc(&encoder);
                 let parse = make("av1parse")?;
                 let pay = make("rtpav1pay")?;
-                pay.set_property("pt", 96u32);
-                (encoder, vec![parse, pay], "AV1")
+                pay.set_property("pt", pt);
+                (encoder, vec![parse, pay])
+            }
+            Self::Vp9 => {
+                let encoder = make("vp9enc")?;
+                configure_vpx(&encoder);
+                let pay = make("rtpvp9pay")?;
+                pay.set_property("pt", pt);
+                pay.set_property_from_str("picture-id-mode", "15-bit");
+                (encoder, vec![pay])
             }
             Self::Vp8 => {
                 let encoder = make("vp8enc")?;
-                // deadline=1 selects realtime mode; PLI keyframes arrive as
-                // upstream force-keyunit events.
-                encoder.set_property("deadline", 1i64);
-                encoder.set_property_from_str("end-usage", "cbr");
-                encoder.set_property(
-                    "target-bitrate",
-                    i32::try_from(initial_kbps.saturating_mul(1000)).unwrap_or(i32::MAX),
-                );
-                encoder.set_property("cpu-used", 8i32);
-                encoder.set_property("threads", 4i32);
+                configure_vpx(&encoder);
                 let pay = make("rtpvp8pay")?;
-                pay.set_property("pt", 96u32);
+                pay.set_property("pt", pt);
                 pay.set_property_from_str("picture-id-mode", "15-bit");
-                (encoder, vec![pay], "VP8")
+                (encoder, vec![pay])
             }
         };
-        let mut rtp_caps = gst::Caps::builder("application/x-rtp")
-            .field("media", "video")
-            .field("encoding-name", encoding_name)
-            .field("clock-rate", 90_000)
-            .field("payload", 96)
-            .field("rtcp-fb-nack-pli", true);
-        // The transport-wide congestion control extension carries the feedback
-        // the GCC estimator consumes; without the local element the offer stays
-        // honest and adaptation simply never engages.
-        if gst::ElementFactory::find("rtphdrexttwcc").is_some() {
-            rtp_caps = rtp_caps
-                .field("rtcp-fb-transport-cc", true)
-                .field("extmap-3", TWCC_EXTENSION_URI);
-        }
         let caps = gst::ElementFactory::make("capsfilter")
-            .property("caps", rtp_caps.build())
+            .property("caps", {
+                let mut caps = gst::Caps::new_empty();
+                caps.get_mut()
+                    .expect("caps are not yet shared")
+                    .append_structure(self.rtp_structure(pt));
+                caps
+            })
             .build()
             .map_err(|_| "`capsfilter` is unavailable".to_owned())?;
         let mut chain = vec![encoder.clone()];
@@ -290,7 +422,10 @@ pub enum AudioCapture {
 pub struct BroadcastConfig {
     pub source: SourceConfig,
     pub audio: AudioCapture,
-    pub video_codec: VideoCodecPreference,
+    /// The ranked codecs the offer advertises, best first; an empty ranking
+    /// means the default order ([`VideoCodecId::ALL`]). Codecs whose encoder
+    /// is not installed are skipped; VP8 backstops an empty result.
+    pub video_codecs: Vec<VideoCodecId>,
     /// The maximum frame rate, in frames per second. Frames above this are
     /// dropped ahead of the tee; a slower source is passed through unchanged.
     pub frame_rate: u32,
@@ -445,19 +580,41 @@ struct Shared {
     /// stamped with this name, never with the sender the payload claims.
     display_names: Mutex<HashMap<String, String>>,
     ice: Mutex<IceEndpoints>,
-    video_codec: VideoCodec,
+    /// The offered codec ranking; index `i` is advertised at payload type
+    /// `96 + i`. The top entry is the branch built before negotiation and
+    /// defines the shared normalize format.
+    codecs: Vec<VideoCodec>,
     force_relay: bool,
     paused: AtomicBool,
     ended: AtomicBool,
 }
 
+impl Shared {
+    /// The top-ranked offered codec: the branch built ahead of negotiation,
+    /// and the format the shared normalize path produces.
+    fn top_codec(&self) -> VideoCodec {
+        self.codecs[0]
+    }
+}
+
+/// What installing a negotiated video branch produced: every element that
+/// joined the pipeline, plus the head/pad handles when the install created
+/// them (the attach path) rather than reusing existing ones (the swap path).
+struct InstalledVideoBranch {
+    branch_elements: Vec<gst::Element>,
+    valve: Option<gst::Element>,
+    tee_pad: Option<gst::Pad>,
+    sink_pad: Option<gst::Pad>,
+}
+
 struct ViewerEntry {
     webrtc: gst::Element,
-    video_valve: gst::Element,
+    /// Present once the answer's codec pick attached the video branch.
+    video_valve: Option<gst::Element>,
     audio_valve: Option<gst::Element>,
-    encoder: gst::Element,
     branch: Vec<gst::Element>,
-    tee_pad: gst::Pad,
+    /// Present once the video branch is attached.
+    tee_pad: Option<gst::Pad>,
     audio_tee_pad: Option<gst::Pad>,
     remote_description_set: bool,
     queued_candidates: Vec<(u32, String)>,
@@ -470,10 +627,26 @@ struct ViewerEntry {
     /// stats reporter and read by the adaptive controller to detect the
     /// application-limited region. Zero until the first stats sample.
     actual_send_kbps: Arc<AtomicU32>,
+    /// The codec this viewer's branch encodes with: the top-ranked codec
+    /// until the answer arrives, the negotiated codec after.
     codec: VideoCodec,
+    /// The encode chain (encoder … capsfilter) between the valve and the
+    /// connection; empty until the answer picks the codec, replaced if a
+    /// later answer picks another.
+    encode: Vec<gst::Element>,
+    /// The connection's video sink pad, present once the branch attached.
+    video_sink_pad: Option<gst::Pad>,
+    /// What live rate control drives, shared with the GCC callback so a
+    /// codec swap redirects it to the replacement encoder.
+    rate_target: RateTarget,
     /// The reliable data channel carrying chat with this viewer.
     chat: Option<gst_webrtc::WebRTCDataChannel>,
 }
+
+/// The encoder live rate control drives, and the codec whose property scheme
+/// applies. `None` until the answer's codec pick attaches the encode chain;
+/// swapped together with it.
+type RateTarget = Arc<Mutex<Option<(VideoCodec, gst::Element)>>>;
 
 impl Broadcast {
     pub fn start(
@@ -485,8 +658,9 @@ impl Broadcast {
             SourceConfig::Synthetic(_) | SourceConfig::Idle => "videotestsrc",
             SourceConfig::Screen(_) => "pipewiresrc",
         };
-        let video_codec = VideoCodec::select(config.video_codec);
-        tracing::info!(codec = ?video_codec, "encoding video");
+        let codecs = VideoCodec::resolve_ranking(&config.video_codecs);
+        let video_codec = codecs[0];
+        tracing::info!(offered = ?codecs, "encoding video");
         for &element in [
             source_element,
             "tee",
@@ -509,7 +683,7 @@ impl Broadcast {
             viewers: Mutex::new(HashMap::new()),
             display_names: Mutex::new(HashMap::new()),
             ice: Mutex::new(ice_endpoints(&config.ice)),
-            video_codec,
+            codecs,
             force_relay: config.force_relay,
             paused: AtomicBool::new(false),
             ended: AtomicBool::new(false),
@@ -677,7 +851,7 @@ impl Broadcast {
     pub fn replace_source(&self, source: SourceConfig) -> Result<(), BroadcastError> {
         let audio_mode = AudioHeadMode::of(&source);
         let (new_head, new_capture) = build_source_head(source)?;
-        let raw_format = self.shared.video_codec.raw_format();
+        let raw_format = self.shared.top_codec().raw_format();
         {
             let mut head = self.source_head.lock().expect("source lock");
             let old_head = std::mem::take(&mut *head);
@@ -834,20 +1008,6 @@ impl Broadcast {
                 .build()
                 .map_err(|_| BroadcastError::Viewer(format!("`{name}` is unavailable")))
         };
-        // A shallow leaky queue decouples this viewer from the shared source
-        // and drops stale frames instead of building latency when the encoder
-        // falls behind. The buffer count is the only limit: the byte and time
-        // defaults are smaller than single high-resolution frames and would
-        // starve the flow entirely.
-        let queue = gst::ElementFactory::make("queue")
-            .property_from_str("leaky", "downstream")
-            .property("max-size-buffers", 2u32)
-            .property("max-size-bytes", 0u32)
-            .property("max-size-time", 0u64)
-            .build()
-            .map_err(|_| BroadcastError::Viewer("`queue` is unavailable".into()))?;
-        let valve = build("valve")?;
-        valve.set_property("drop", self.shared.paused.load(Ordering::SeqCst));
         // Congestion control is delegated to GStreamer's GCC estimator
         // (rtpgccbwe), attached to the connection through webrtcbin's
         // aux-sender hook; without the element the viewer holds the ceiling.
@@ -862,14 +1022,10 @@ impl Broadcast {
         };
         let target_kbps = Arc::new(AtomicU32::new(initial_kbps));
         let actual_send_kbps = Arc::new(AtomicU32::new(0));
-        let codec = self.shared.video_codec;
-        let (encode_chain, encoder) = codec
-            .build_encode(initial_kbps)
-            .map_err(BroadcastError::Viewer)?;
-        let caps = encode_chain
-            .last()
-            .cloned()
-            .expect("the encode chain ends with a capsfilter");
+        // The branch reports the top-ranked codec until the answer's pick
+        // attaches the real encoder.
+        let codec = self.shared.top_codec();
+        let rate_target: RateTarget = Arc::new(Mutex::new(None));
         let webrtc = gst::ElementFactory::make("webrtcbin")
             .property_from_str("bundle-policy", "max-bundle")
             .build()
@@ -889,23 +1045,23 @@ impl Broadcast {
             }
         }
 
-        let mut branch = vec![queue.clone(), valve.clone()];
-        branch.extend(encode_chain);
-        branch.push(webrtc.clone());
+        let mut branch = vec![webrtc.clone()];
         self.pipeline
-            .add_many(&branch)
+            .add(&webrtc)
             .map_err(|error| BroadcastError::Viewer(error.to_string()))?;
-        gst::Element::link_many(&branch[..branch.len() - 1])
-            .map_err(|error| BroadcastError::Viewer(error.to_string()))?;
-        let webrtc_sink = webrtc.request_pad_simple("sink_%u").ok_or_else(|| {
-            BroadcastError::Viewer("the connection rejected a media stream".into())
-        })?;
-        caps.static_pad("src")
-            .expect("capsfilter has a src pad")
-            .link(&webrtc_sink)
-            .map_err(|_| {
-                BroadcastError::Viewer("the encoder could not reach the connection".into())
-            })?;
+        // The video m-line is declared as a detached transceiver carrying the
+        // whole codec ranking; no encoder exists yet. A pad linked here would
+        // pin the m-line to its single codec (webrtcbin intersects
+        // codec-preferences with pad caps), so the encode branch attaches
+        // only once the answer picks — see `apply_negotiated_codec`.
+        let video_transceiver = webrtc.emit_by_name::<gst_webrtc::WebRTCRTPTransceiver>(
+            "add-transceiver",
+            &[
+                &gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+                &offered_caps(&self.shared.codecs),
+            ],
+        );
+        video_transceiver.set_property("do-nack", true);
 
         // The audio leg feeds the same connection as a second stream.
         let audio_leg_input = if self.audio_tee.is_some() {
@@ -960,7 +1116,9 @@ impl Broadcast {
                 .map_err(|error| BroadcastError::Viewer(error.to_string()))?;
             gst::Element::link_many(&audio_leg)
                 .map_err(|error| BroadcastError::Viewer(error.to_string()))?;
-            let audio_sink = webrtc.request_pad_simple("sink_%u").ok_or_else(|| {
+            // Explicitly m-line 1: an unnumbered request would bind the
+            // detached video transceiver at index 0.
+            let audio_sink = webrtc.request_pad_simple("sink_1").ok_or_else(|| {
                 BroadcastError::Viewer("the connection rejected an audio stream".into())
             })?;
             audio_caps
@@ -991,29 +1149,24 @@ impl Broadcast {
         if adaptive_bwe {
             wire_gcc_bwe(
                 &webrtc,
-                &encoder,
-                codec,
+                Arc::clone(&rate_target),
                 encoding.bitrate_kbps,
                 self.audio_tee.is_some(),
                 Arc::clone(&target_kbps),
                 Arc::clone(&actual_send_kbps),
             );
         }
-        for index in 0..=i32::from(audio_queue.is_some()) {
-            if let Some(transceiver) = webrtc
+        if audio_queue.is_some()
+            && let Some(transceiver) = webrtc
                 .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
                     "get-transceiver",
-                    &[&index],
+                    &[&1i32],
                 )
-            {
-                transceiver.set_property(
-                    "direction",
-                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-                );
-                if index == 0 {
-                    transceiver.set_property("do-nack", true);
-                }
-            }
+        {
+            transceiver.set_property(
+                "direction",
+                gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+            );
         }
 
         for element in branch.iter().rev() {
@@ -1021,12 +1174,7 @@ impl Broadcast {
                 .sync_state_with_parent()
                 .map_err(|error| BroadcastError::Viewer(error.to_string()))?;
         }
-        let tee_pad = self.tee.request_pad_simple("src_%u").ok_or_else(|| {
-            BroadcastError::Viewer("the source could not add another viewer".into())
-        })?;
-        tee_pad
-            .link(&queue.static_pad("sink").expect("queue has a sink pad"))
-            .map_err(|_| BroadcastError::Viewer("the source could not reach the encoder".into()))?;
+        let webrtc_handle = webrtc.clone();
         let audio_tee_pad = match (&self.audio_tee, audio_queue) {
             (Some(audio_tee), Some(audio_queue)) => {
                 let pad = audio_tee.request_pad_simple("src_%u").ok_or_else(|| {
@@ -1049,11 +1197,10 @@ impl Broadcast {
             peer_id.to_owned(),
             ViewerEntry {
                 webrtc,
-                video_valve: valve,
+                video_valve: None,
                 audio_valve,
-                encoder,
                 branch,
-                tee_pad,
+                tee_pad: None,
                 audio_tee_pad,
                 remote_description_set: false,
                 queued_candidates: Vec::new(),
@@ -1061,10 +1208,244 @@ impl Broadcast {
                 target_kbps,
                 actual_send_kbps,
                 codec,
+                encode: Vec::new(),
+                video_sink_pad: None,
+                rate_target,
                 chat,
             },
         );
+        // With the video m-line declared as a detached transceiver, webrtcbin
+        // never fires on-negotiation-needed (it only checks on pad and
+        // description changes), so the initial offer is kicked explicitly
+        // once the connection is fully assembled.
+        negotiate(&webrtc_handle, &self.shared, peer_id, false);
         Ok(())
+    }
+
+    /// Gives a viewer the encode branch its answer negotiated. On the first
+    /// answer this attaches the whole video branch (tee pad, queue, valve,
+    /// encoder chain, connection pad) — no encoder exists before the pick is
+    /// known. A later answer picking a different codec (never expected once
+    /// preferences narrow, but legal SDP) swaps the encode chain in place. A
+    /// failure leaves the viewer without video (audio and chat continue)
+    /// rather than failing the session; the client's escalation rebuild
+    /// recovers it.
+    fn apply_negotiated_codec(&self, peer_id: &str, pt: u32, codec: VideoCodec) {
+        let viewers = self.shared.viewers.lock().expect("viewer lock");
+        let Some(entry) = viewers.get(peer_id) else {
+            return;
+        };
+        let attached = !entry.encode.is_empty();
+        if attached && entry.codec == codec {
+            return;
+        }
+        let webrtc = entry.webrtc.clone();
+        let valve = entry.video_valve.clone();
+        let old = entry.encode.clone();
+        let sink_pad = entry.video_sink_pad.clone();
+        let target_kbps = entry.target_kbps.load(Ordering::Relaxed);
+        let paused = self.shared.paused.load(Ordering::SeqCst);
+        drop(viewers);
+
+        // Build the encode chain first; nothing is dismantled on failure.
+        let built = (|| -> Result<(Vec<gst::Element>, gst::Element), String> {
+            let (chain, encoder) = codec.build_encode(target_kbps, pt)?;
+            let mut elements = Vec::new();
+            // The shared path normalizes to the top codec's raw format; a
+            // negotiated codec wanting another format converts locally.
+            if codec.raw_format() != self.shared.top_codec().raw_format() {
+                let convert = gst::ElementFactory::make("videoconvert")
+                    .build()
+                    .map_err(|_| "`videoconvert` is unavailable".to_owned())?;
+                elements.push(convert);
+            }
+            elements.extend(chain);
+            Ok((elements, encoder))
+        })();
+        let (elements, encoder) = match built {
+            Ok(built) => built,
+            Err(reason) => {
+                tracing::warn!(
+                    peer = peer_id,
+                    %reason,
+                    "the negotiated codec's encoder could not be built; this viewer gets no video"
+                );
+                return;
+            }
+        };
+
+        let installed = if attached {
+            self.swap_encode_chain(&valve, &old, &sink_pad, &elements)
+        } else {
+            self.attach_video_branch(&webrtc, paused, &elements)
+        };
+        match installed {
+            Ok(installed) => {
+                let mut viewers = self.shared.viewers.lock().expect("viewer lock");
+                if let Some(entry) = viewers.get_mut(peer_id) {
+                    *entry.rate_target.lock().expect("rate target lock") =
+                        Some((codec, encoder.clone()));
+                    entry.branch.retain(|element| !old.contains(element));
+                    entry.branch.extend(installed.branch_elements.iter().cloned());
+                    entry.encode = elements;
+                    entry.codec = codec;
+                    if let Some(valve) = installed.valve {
+                        entry.video_valve = Some(valve);
+                    }
+                    if let Some(pad) = installed.tee_pad {
+                        entry.tee_pad = Some(pad);
+                    }
+                    if let Some(pad) = installed.sink_pad {
+                        entry.video_sink_pad = Some(pad);
+                    }
+                } else {
+                    // The viewer left mid-install; dismantle what was built.
+                    for element in installed.branch_elements.iter().rev() {
+                        let _ = element.set_state(gst::State::Null);
+                    }
+                    let _ = self.pipeline.remove_many(&installed.branch_elements);
+                }
+            }
+            Err(reason) => tracing::warn!(
+                peer = peer_id,
+                %reason,
+                "the negotiated video branch could not be installed; this viewer gets no video"
+            ),
+        }
+    }
+
+    /// First-answer path: builds the branch head (queue, valve), links the
+    /// encode chain into the connection's declared video m-line, and taps the
+    /// source tee last so frames only flow into a complete branch.
+    fn attach_video_branch(
+        &self,
+        webrtc: &gst::Element,
+        paused: bool,
+        encode: &[gst::Element],
+    ) -> Result<InstalledVideoBranch, String> {
+        // A shallow leaky queue decouples this viewer from the shared source
+        // and drops stale frames instead of building latency when the encoder
+        // falls behind. The buffer count is the only limit: the byte and time
+        // defaults are smaller than single high-resolution frames and would
+        // starve the flow entirely.
+        let queue = gst::ElementFactory::make("queue")
+            .property_from_str("leaky", "downstream")
+            .property("max-size-buffers", 2u32)
+            .property("max-size-bytes", 0u32)
+            .property("max-size-time", 0u64)
+            .build()
+            .map_err(|_| "`queue` is unavailable".to_owned())?;
+        let valve = gst::ElementFactory::make("valve")
+            .build()
+            .map_err(|_| "`valve` is unavailable".to_owned())?;
+        valve.set_property("drop", paused);
+        let mut elements = vec![queue.clone(), valve.clone()];
+        elements.extend(encode.iter().cloned());
+        self.pipeline
+            .add_many(&elements)
+            .map_err(|error| error.to_string())?;
+        gst::Element::link_many(&elements).map_err(|error| error.to_string())?;
+        // The declared video m-line's pad; requested by name because the
+        // transceiver was added detached at index 0.
+        let sink_pad = webrtc
+            .request_pad_simple("sink_0")
+            .ok_or("the connection rejected the video stream")?;
+        elements
+            .last()
+            .expect("the encode chain is never empty")
+            .static_pad("src")
+            .expect("capsfilter has a src pad")
+            .link(&sink_pad)
+            .map_err(|_| "the encoder could not reach the connection".to_owned())?;
+        for element in elements.iter().rev() {
+            element
+                .sync_state_with_parent()
+                .map_err(|error| error.to_string())?;
+        }
+        let tee_pad = self
+            .tee
+            .request_pad_simple("src_%u")
+            .ok_or("the source could not add another viewer")?;
+        tee_pad
+            .link(&queue.static_pad("sink").expect("queue has a sink pad"))
+            .map_err(|_| "the source could not reach the encoder".to_owned())?;
+        Ok(InstalledVideoBranch {
+            branch_elements: elements,
+            valve: Some(valve),
+            tee_pad: Some(tee_pad),
+            sink_pad: Some(sink_pad),
+        })
+    }
+
+    /// Later-answer path: replaces the encode chain between the existing
+    /// valve and connection pad. The branch's streaming thread is parked
+    /// under a blocking probe at the valve, exactly as `replace_source` parks
+    /// the capture head; unlike there the probed pad outlives the swap, so
+    /// the probe is removed afterwards.
+    fn swap_encode_chain(
+        &self,
+        valve: &Option<gst::Element>,
+        old: &[gst::Element],
+        sink_pad: &Option<gst::Pad>,
+        elements: &[gst::Element],
+    ) -> Result<InstalledVideoBranch, String> {
+        let valve = valve.as_ref().ok_or("the video branch has no valve")?;
+        let sink_pad = sink_pad
+            .as_ref()
+            .ok_or("the video branch has no connection pad")?;
+        let valve_src = valve.static_pad("src").expect("valve has a src pad");
+        let (parked, wait_parked) = std::sync::mpsc::channel::<()>();
+        let probe = valve_src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
+            let _ = parked.send(());
+            gst::PadProbeReturn::Ok
+        });
+        let _ = wait_parked.recv_timeout(Duration::from_secs(1));
+        if let Some(first) = old.first() {
+            let _ = valve_src.unlink(&first.static_pad("sink").expect("the chain has a sink pad"));
+        }
+        if let Some(last) = old.last() {
+            let _ = last
+                .static_pad("src")
+                .expect("the chain has a src pad")
+                .unlink(sink_pad);
+        }
+        for element in old.iter().rev() {
+            let _ = element.set_state(gst::State::Null);
+        }
+        let _ = self.pipeline.remove_many(old);
+
+        let installed = (|| -> Result<(), String> {
+            self.pipeline
+                .add_many(elements)
+                .map_err(|error| error.to_string())?;
+            gst::Element::link_many(elements).map_err(|error| error.to_string())?;
+            valve
+                .link(&elements[0])
+                .map_err(|error| error.to_string())?;
+            elements
+                .last()
+                .expect("the encode chain is never empty")
+                .static_pad("src")
+                .expect("capsfilter has a src pad")
+                .link(sink_pad)
+                .map_err(|_| "the encoder could not reach the connection".to_owned())?;
+            for element in elements.iter().rev() {
+                element
+                    .sync_state_with_parent()
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })();
+        if let Some(probe) = probe {
+            valve_src.remove_probe(probe);
+        }
+        installed?;
+        Ok(InstalledVideoBranch {
+            branch_elements: elements.to_vec(),
+            valve: None,
+            tee_pad: None,
+            sink_pad: None,
+        })
     }
 
     /// Sends a chat message to every viewer over their data channels. Messages
@@ -1124,6 +1505,7 @@ impl Broadcast {
     pub fn accept_answer(&self, peer_id: &str, sdp: &str) -> Result<(), BroadcastError> {
         let message = gst_sdp::SDPMessage::parse_buffer(sdp.as_bytes())
             .map_err(|_| BroadcastError::InvalidSdp)?;
+        let negotiated = negotiated_video_codec(&message, &self.shared.codecs);
         let answer =
             gst_webrtc::WebRTCSessionDescription::new(gst_webrtc::WebRTCSDPType::Answer, message);
         let viewers = self.shared.viewers.lock().expect("viewer lock");
@@ -1131,7 +1513,27 @@ impl Broadcast {
             return Ok(());
         };
         let webrtc = entry.webrtc.clone();
+        let current = entry.codec;
         drop(viewers);
+
+        // Honour the answer's codec pick before media starts. The offer
+        // advertised every ranked codec; a pick other than the pre-built
+        // top branch swaps the encode chain on the same connection, and the
+        // transceiver preferences narrow to the pick so ICE-restart re-offers
+        // cannot flip the codec mid-stream.
+        match negotiated {
+            None => tracing::warn!(
+                peer = peer_id,
+                "the answer accepted no offered video codec; this viewer gets audio and chat only"
+            ),
+            Some((pt, codec)) => {
+                if codec != current {
+                    tracing::info!(peer = peer_id, offered = ?current, picked = ?codec, "the answer picked another codec");
+                }
+                self.apply_negotiated_codec(peer_id, pt, codec);
+                narrow_codec_preferences(&webrtc, codec, pt);
+            }
+        }
         let shared = Arc::clone(&self.shared);
         let peer = peer_id.to_owned();
         let applied = gst::Promise::with_change_func(move |reply| {
@@ -1192,7 +1594,9 @@ impl Broadcast {
         let viewers = self.shared.viewers.lock().expect("viewer lock");
         if let Some(entry) = viewers.get(peer_id) {
             entry.target_kbps.store(bitrate_kbps, Ordering::Relaxed);
-            entry.codec.set_rate(&entry.encoder, bitrate_kbps, bitrate_kbps);
+            if let Some((codec, encoder)) = &*entry.rate_target.lock().expect("rate target lock") {
+                codec.set_rate(encoder, bitrate_kbps, bitrate_kbps);
+            }
         }
     }
 
@@ -1224,7 +1628,9 @@ impl Broadcast {
         let paused = self.shared.paused.load(Ordering::SeqCst);
         let viewers = self.shared.viewers.lock().expect("viewer lock");
         for entry in viewers.values() {
-            entry.video_valve.set_property("drop", paused);
+            if let Some(video_valve) = &entry.video_valve {
+                video_valve.set_property("drop", paused);
+            }
             if let Some(audio_valve) = &entry.audio_valve {
                 audio_valve.set_property("drop", paused);
             }
@@ -1464,31 +1870,39 @@ fn dismantle_viewer(
     let audio_tee = audio_tee.cloned();
     let branch = entry.branch.clone();
     let audio_tee_pad = entry.audio_tee_pad.clone();
-    entry
-        .tee_pad
-        .add_probe(gst::PadProbeType::IDLE, move |pad, _| {
-            if let Some(peer) = pad.peer() {
-                let _ = pad.unlink(&peer);
+    // Detach the audio tap once the video tap is off (or immediately for a
+    // viewer whose answer never attached a video branch), then dismantle.
+    let after_video = move || {
+        match (&audio_tee, &audio_tee_pad) {
+            (Some(audio_tee), Some(audio_pad)) => {
+                let pipeline = pipeline.clone();
+                let branch = branch.clone();
+                let audio_tee = audio_tee.clone();
+                audio_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
+                    if let Some(peer) = pad.peer() {
+                        let _ = pad.unlink(&peer);
+                    }
+                    audio_tee.release_request_pad(pad);
+                    dismantle_branch(&pipeline, &branch);
+                    gst::PadProbeReturn::Remove
+                });
             }
-            tee.release_request_pad(pad);
-            match (&audio_tee, &audio_tee_pad) {
-                (Some(audio_tee), Some(audio_pad)) => {
-                    let pipeline = pipeline.clone();
-                    let audio_tee = audio_tee.clone();
-                    let branch = branch.clone();
-                    audio_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
-                        if let Some(peer) = pad.peer() {
-                            let _ = pad.unlink(&peer);
-                        }
-                        audio_tee.release_request_pad(pad);
-                        dismantle_branch(&pipeline, &branch);
-                        gst::PadProbeReturn::Remove
-                    });
+            _ => dismantle_branch(&pipeline, &branch),
+        }
+    };
+    match &entry.tee_pad {
+        Some(tee_pad) => {
+            tee_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
+                if let Some(peer) = pad.peer() {
+                    let _ = pad.unlink(&peer);
                 }
-                _ => dismantle_branch(&pipeline, &branch),
-            }
-            gst::PadProbeReturn::Remove
-        });
+                tee.release_request_pad(pad);
+                after_video();
+                gst::PadProbeReturn::Remove
+            });
+        }
+        None => after_video(),
+    }
 }
 
 /// Builds the replaceable capture-side element chain for one source and
@@ -1719,10 +2133,75 @@ fn request_all_stats(shared: &Arc<Shared>) {
 /// fixed audio budget subtracted so congestion throttles video and never audio;
 /// the controller then holds the rate steady on an idle screen (where the raw
 /// estimate collapses) instead of chasing it down. See [`crate::rate`].
+/// The multi-codec caps the video transceiver advertises: one structure per
+/// ranked codec, payload types 96 upward in rank order.
+fn offered_caps(codecs: &[VideoCodec]) -> gst::Caps {
+    let mut caps = gst::Caps::new_empty();
+    {
+        let caps = caps.get_mut().expect("caps are not yet shared");
+        for (index, codec) in codecs.iter().enumerate() {
+            caps.append_structure(codec.rtp_structure(96 + index as u32));
+        }
+    }
+    caps
+}
+
+/// Which offered codec a viewer's answer accepted: the highest-ranked codec
+/// whose payload type appears in the answer's video m-line — rank order is
+/// the presenter's, the answer only removes what it cannot decode. `None`
+/// when the m-line was rejected or names nothing that was offered. Payload
+/// types are the authority (RFC 3264 requires the answer to reuse the
+/// offer's), double-checked against the encoding name when the answer
+/// carries an rtpmap.
+fn negotiated_video_codec(
+    answer: &gst_sdp::SDPMessage,
+    codecs: &[VideoCodec],
+) -> Option<(u32, VideoCodec)> {
+    let media = answer.medias().find(|media| media.media() == Some("video"))?;
+    if media.port() == 0 {
+        return None;
+    }
+    let accepted: Vec<u32> = media
+        .formats()
+        .filter_map(|format| format.parse().ok())
+        .collect();
+    for (index, codec) in codecs.iter().enumerate() {
+        let pt = 96 + index as u32;
+        if !accepted.contains(&pt) {
+            continue;
+        }
+        let name_matches = media
+            .caps_from_media(i32::try_from(pt).unwrap_or(96))
+            .and_then(|caps| {
+                let structure = caps.structure(0)?;
+                let name = structure.get::<&str>("encoding-name").ok()?;
+                Some(name.eq_ignore_ascii_case(codec.encoding_name()))
+            })
+            .unwrap_or(true);
+        if name_matches {
+            return Some((pt, *codec));
+        }
+    }
+    None
+}
+
+/// Narrows the video transceiver's preferences to the negotiated codec so
+/// later re-offers (ICE restarts, source changes) keep it stable.
+fn narrow_codec_preferences(webrtc: &gst::Element, codec: VideoCodec, pt: u32) {
+    if let Some(transceiver) = webrtc
+        .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>("get-transceiver", &[&0i32])
+    {
+        let mut caps = gst::Caps::new_empty();
+        caps.get_mut()
+            .expect("caps are not yet shared")
+            .append_structure(codec.rtp_structure(pt));
+        transceiver.set_property("codec-preferences", caps);
+    }
+}
+
 fn wire_gcc_bwe(
     webrtc: &gst::Element,
-    encoder: &gst::Element,
-    codec: VideoCodec,
+    rate_target: RateTarget,
     ceiling_kbps: u32,
     has_audio: bool,
     target_kbps: Arc<AtomicU32>,
@@ -1733,7 +2212,6 @@ fn wire_gcc_bwe(
     let min_bps = audio_bps + VIDEO_MIN_KBPS * 1000;
     let max_bps = audio_bps + ceiling_kbps.saturating_mul(1000);
     let start_bps = audio_bps + start_video_kbps(ceiling_kbps) * 1000;
-    let encoder = encoder.clone();
     webrtc.connect("request-aux-sender", false, move |_| {
         let Ok(bwe) = gst::ElementFactory::make("rtpgccbwe").build() else {
             return None;
@@ -1743,7 +2221,7 @@ fn wire_gcc_bwe(
         bwe.set_property("min-bitrate", min_bps);
         bwe.set_property("max-bitrate", max_bps);
         bwe.set_property("estimated-bitrate", start_bps);
-        let encoder = encoder.clone();
+        let rate_target = Arc::clone(&rate_target);
         let target_kbps = Arc::clone(&target_kbps);
         let actual_send_kbps = Arc::clone(&actual_send_kbps);
         let controller = std::sync::Mutex::new(AdaptiveController::new(
@@ -1763,7 +2241,12 @@ fn wire_gcc_bwe(
                 .lock()
                 .expect("rate lock")
                 .on_estimate(estimate_kbps, actual_kbps);
-            codec.set_rate(&encoder, command.target_kbps, command.max_kbps);
+            // Indirect so the answer-driven codec pick (and any later swap)
+            // redirects rate control to the encoder actually in use; before
+            // the pick there is nothing to drive.
+            if let Some((codec, encoder)) = &*rate_target.lock().expect("rate target lock") {
+                codec.set_rate(encoder, command.target_kbps, command.max_kbps);
+            }
             target_kbps.store(command.target_kbps, Ordering::Relaxed);
             tracing::debug!(
                 estimate_kbps,

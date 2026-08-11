@@ -24,7 +24,7 @@ mod teardown;
 
 pub use broadcast::{
     AudioCapture, Broadcast, BroadcastConfig, BroadcastError, BroadcastEvent, EncoderSettings,
-    SourceConfig, SyntheticSource, VideoCodecPreference,
+    SourceConfig, SyntheticSource, VideoCodecCapability, VideoCodecId, video_codec_inventory,
 };
 pub use capture::{CaptureError, CaptureRequest, CaptureStream};
 pub use overlay::{NativeHandle, NativeVideoSurface};

@@ -11,7 +11,7 @@ use clarity_client::viewer::{
 };
 use clarity_media::{
     AudioCapture, CaptureError, CaptureRequest, CaptureStream, SourceConfig, SyntheticSource,
-    VideoCodecPreference,
+    VideoCodecId,
 };
 use clarity_protocol::{RoomAccessPolicy, SharingState};
 use secrecy::SecretString;
@@ -28,18 +28,24 @@ struct Cli {
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum CodecArg {
     Auto,
-    H264,
     Av1,
+    H265,
+    H264,
+    Vp9,
     Vp8,
 }
 
-impl From<CodecArg> for VideoCodecPreference {
-    fn from(arg: CodecArg) -> Self {
-        match arg {
-            CodecArg::Auto => Self::Auto,
-            CodecArg::H264 => Self::H264,
-            CodecArg::Av1 => Self::Av1,
-            CodecArg::Vp8 => Self::Vp8,
+impl CodecArg {
+    /// `Auto` offers the default ranking; a specific codec pins the offer to
+    /// exactly that codec (viewers that cannot decode it get no video).
+    fn ranking(self) -> Vec<VideoCodecId> {
+        match self {
+            Self::Auto => Vec::new(),
+            Self::Av1 => vec![VideoCodecId::Av1],
+            Self::H265 => vec![VideoCodecId::H265],
+            Self::H264 => vec![VideoCodecId::H264],
+            Self::Vp9 => vec![VideoCodecId::Vp9],
+            Self::Vp8 => vec![VideoCodecId::Vp8],
         }
     }
 }
@@ -238,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 MediaOptions {
                     source,
                     audio,
-                    video_codec: codec.into(),
+                    video_codecs: codec.ranking(),
                     frame_rate: fps,
                     bitrate_kbps,
                     adaptive: !fixed_bitrate,
@@ -414,7 +420,7 @@ fn restore_token_path() -> Option<std::path::PathBuf> {
 struct MediaOptions {
     source: Option<SourceConfig>,
     audio: AudioCapture,
-    video_codec: VideoCodecPreference,
+    video_codecs: Vec<VideoCodecId>,
     frame_rate: u32,
     bitrate_kbps: u32,
     adaptive: bool,
@@ -484,7 +490,7 @@ async fn present(
             origin: endpoints.origin,
             source: media.source,
             audio: media.audio,
-            video_codec: media.video_codec,
+            video_codecs: media.video_codecs,
             frame_rate: media.frame_rate,
             capture_ceiling: None,
             bitrate_kbps: media.bitrate_kbps,

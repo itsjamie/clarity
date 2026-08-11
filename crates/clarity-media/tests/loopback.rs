@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use clarity_media::{
     AudioCapture, Broadcast, BroadcastConfig, BroadcastEvent, ConnectionState, EncoderSettings,
-    Playback, PlaybackConfig, PlaybackEvent, SourceConfig, SyntheticSource, VideoCodecPreference,
+    Playback, PlaybackConfig, PlaybackEvent, SourceConfig, SyntheticSource, VideoCodecId,
 };
 use clarity_protocol::IceConfiguration;
 use tokio::sync::mpsc;
@@ -195,7 +195,7 @@ async fn broadcast_streams_to_playback_over_loopback() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Auto,
+        video_codecs: vec![],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -281,7 +281,7 @@ async fn adaptive_broadcast_delivers_audio_and_video() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::SystemMix,
-        video_codec: VideoCodecPreference::Auto,
+        video_codecs: vec![],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -367,7 +367,7 @@ async fn av1_broadcast_streams_to_playback() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Av1,
+        video_codecs: vec![VideoCodecId::Av1],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -453,7 +453,7 @@ async fn rebuilt_viewer_reconnects_and_flows() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Auto,
+        video_codecs: vec![],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -521,7 +521,7 @@ async fn decoded_frames_reach_the_frame_sink() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Vp8,
+        video_codecs: vec![VideoCodecId::Vp8],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -583,7 +583,7 @@ async fn chat_flows_both_ways_over_the_data_channel() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Vp8,
+        video_codecs: vec![VideoCodecId::Vp8],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -642,7 +642,7 @@ async fn presenter_preview_frames_reach_the_sink() {
     let (_broadcast, _events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Auto,
+        video_codecs: vec![],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -687,7 +687,7 @@ async fn ice_restart_keeps_media_flowing() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Vp8,
+        video_codecs: vec![VideoCodecId::Vp8],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -778,7 +778,7 @@ async fn replace_source_swaps_mid_stream() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Vp8,
+        video_codecs: vec![VideoCodecId::Vp8],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -853,7 +853,7 @@ async fn idle_then_replace_source_resumes_on_the_same_connection() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: synthetic(),
         audio: AudioCapture::Disabled,
-        video_codec: VideoCodecPreference::Vp8,
+        video_codecs: vec![VideoCodecId::Vp8],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,
@@ -933,7 +933,7 @@ async fn audio_head_follows_the_source_out_of_idle() {
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
         source: SourceConfig::Idle,
         audio: AudioCapture::SystemMix,
-        video_codec: VideoCodecPreference::Vp8,
+        video_codecs: vec![VideoCodecId::Vp8],
         frame_rate: 30,
         ice: empty_ice(),
         force_relay: false,

@@ -777,7 +777,7 @@ fn audio_sink_name() -> &'static str {
 /// still fails the pipeline.
 fn renderable_encodings() -> std::collections::HashSet<&'static str> {
     let available = |name: &str| gst::ElementFactory::find(name).is_some();
-    let candidates: [(&str, &str, &[&str]); 5] = [
+    let candidates: [(&str, &str, &[&str]); 6] = [
         ("VP8", "rtpvp8depay", &["vp8dec"]),
         ("VP9", "rtpvp9depay", &["vp9dec"]),
         (
@@ -785,13 +785,29 @@ fn renderable_encodings() -> std::collections::HashSet<&'static str> {
             "rtph264depay",
             &["vah264dec", "avdec_h264", "openh264dec"],
         ),
+        (
+            "H265",
+            "rtph265depay",
+            &["vah265dec", "nvh265dec", "avdec_h265", "libde265dec"],
+        ),
         ("AV1", "rtpav1depay", &["vaav1dec", "dav1ddec", "av1dec"]),
         ("OPUS", "rtpopusdepay", &["opusdec"]),
     ];
+    // Test hook: encodings listed in CLARITY_DECODE_DENY (comma-separated)
+    // are treated as undecodable, standing in for a viewer without those
+    // plugins so codec fallback is testable on a fully-equipped machine.
+    let denied = std::env::var("CLARITY_DECODE_DENY").unwrap_or_default();
+    let denied: Vec<String> = denied
+        .split(',')
+        .map(|name| name.trim().to_ascii_uppercase())
+        .filter(|name| !name.is_empty())
+        .collect();
     candidates
         .into_iter()
-        .filter(|(_, depayloader, decoders)| {
-            available(depayloader) && decoders.iter().any(|decoder| available(decoder))
+        .filter(|(encoding, depayloader, decoders)| {
+            !denied.iter().any(|name| name == encoding)
+                && available(depayloader)
+                && decoders.iter().any(|decoder| available(decoder))
         })
         .map(|(encoding, _, _)| encoding)
         .collect()

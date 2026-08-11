@@ -1030,6 +1030,7 @@ pub fn settings(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
             ui.spacing_mut().item_spacing = vec2(0.0, 16.0);
             identity_card(ui, pal, state);
             capture_card(ui, pal, state);
+            codec_card(ui, pal, state);
             network_card(ui, pal, state);
         });
     });
@@ -1147,6 +1148,136 @@ fn commit_identity_names(state: &mut AppState) {
 }
 
 /// A settings section: an uppercase mono label over its content, in a card.
+/// The ranked codec list: every codec the engine knows, in the user's order,
+/// each labelled hardware or software so the ranking is an informed choice.
+/// Reordering persists the full explicit ranking.
+fn codec_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
+    use clarity_client::{VideoCodecId, video_codec_inventory};
+    settings_card(ui, pal, "Codec preference", |ui| {
+        let inventory = video_codec_inventory();
+        // Effective order: the persisted ranking's known ids, then anything
+        // it does not mention in the engine's default order — a codec added
+        // by a newer build appears rather than vanishing.
+        let mut order: Vec<VideoCodecId> = Vec::new();
+        for id in state
+            .store
+            .settings
+            .codec_ranking
+            .iter()
+            .filter_map(|id| VideoCodecId::parse(id))
+            .chain(VideoCodecId::ALL)
+        {
+            if !order.contains(&id) {
+                order.push(id);
+            }
+        }
+        let mut moved: Option<(usize, usize)> = None;
+        let last = order.len() - 1;
+        for (index, codec) in order.iter().enumerate() {
+            let capability = inventory.iter().find(|entry| entry.codec == *codec);
+            let hardware = capability.is_some_and(|entry| entry.hardware);
+            let available = capability.is_some_and(|entry| entry.available);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.add_sized(
+                    vec2(14.0, 20.0),
+                    egui::Label::new(mono_text(format!("{}", index + 1), 10.0, pal.text_faint)),
+                );
+                let name_color = if available { pal.text_bright } else { pal.text_dim };
+                ui.add_sized(
+                    vec2(44.0, 20.0),
+                    egui::Label::new(strong(codec.label(), 12.5, name_color)),
+                );
+                let (badge, badge_color) = if hardware {
+                    ("hardware", pal.accent_text)
+                } else {
+                    ("software", pal.text_muted)
+                };
+                Frame::new()
+                    .fill(if hardware { pal.accent_wash } else { pal.raised })
+                    .corner_radius(CornerRadius::same(99))
+                    .inner_margin(Margin::symmetric(7, 2))
+                    .show(ui, |ui| {
+                        ui.label(mono_text(badge, 9.0, badge_color));
+                    });
+                if !available {
+                    ui.label(mono_text("not on this machine", 9.5, pal.text_faint));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_enabled_ui(index < last, |ui| {
+                        if rank_button(ui, pal, false) {
+                            moved = Some((index, index + 1));
+                        }
+                    });
+                    ui.add_enabled_ui(index > 0, |ui| {
+                        if rank_button(ui, pal, true) {
+                            moved = Some((index, index - 1));
+                        }
+                    });
+                });
+            });
+            if index < last {
+                ui.add_space(4.0);
+            }
+        }
+        if let Some((from, to)) = moved {
+            order.swap(from, to);
+            state.store.settings.codec_ranking =
+                order.iter().map(|id| id.id().to_owned()).collect();
+            let _ = state.store.persist_settings();
+        }
+        ui.add_space(14.0);
+        ui.label(text(
+            "Every codec this machine can encode is offered, best first; a viewer takes the \
+             first it can decode. Hardware encoding is effectively free — software encoding \
+             costs CPU at high resolutions.",
+            12.0,
+            pal.text_dim,
+        ));
+    });
+}
+
+/// A small square rank-reorder button; the arrow is painted (the bundled
+/// fonts carry no triangle glyphs), pointing up when `up`.
+fn rank_button(ui: &mut egui::Ui, pal: &Palette, up: bool) -> bool {
+    let enabled = ui.is_enabled();
+    let color = if enabled { pal.text_muted } else { pal.text_faint };
+    let response = ui.add_sized(
+        vec2(24.0, 22.0),
+        egui::Button::new("")
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, pal.border)),
+    );
+    let center = response.rect.center();
+    let (w, h) = (8.0, 4.5);
+    let half = vec2(w / 2.0, h / 2.0);
+    let points = if up {
+        vec![
+            center + vec2(-half.x, half.y),
+            center + vec2(half.x, half.y),
+            center + vec2(0.0, -half.y),
+        ]
+    } else {
+        vec![
+            center + vec2(-half.x, -half.y),
+            center + vec2(half.x, -half.y),
+            center + vec2(0.0, half.y),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            response.rect,
+            4.0,
+            Stroke::new(1.0, pal.border_strong),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.clicked()
+}
+
 fn settings_card(ui: &mut egui::Ui, pal: &Palette, label: &str, body: impl FnOnce(&mut egui::Ui)) {
     card(ui, pal.card, pal.border, Margin::same(22), |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);

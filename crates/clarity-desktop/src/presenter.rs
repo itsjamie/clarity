@@ -21,7 +21,7 @@ use clarity_client::rooms::{RoomOptions, create_room, server_endpoints};
 use clarity_client::signaling::SignalingState;
 use clarity_client::{
     AudioCapture, CaptureRequest, CaptureStream, ConnectionState, FrameSink, SourceConfig,
-    SyntheticSource, VideoCodecPreference,
+    SyntheticSource, VideoCodecId,
 };
 use clarity_identity::{CaptureProfile, Settings};
 use clarity_protocol::{RoomAccessPolicy, SharingState};
@@ -50,6 +50,9 @@ pub struct PresenterConfig {
     pub max_capture: (u32, u32),
     pub include_system_audio: bool,
     pub force_relay: bool,
+    /// Ranked codec preference from Settings, parsed to engine ids; empty
+    /// means the engine's default order.
+    pub video_codecs: Vec<VideoCodecId>,
     pub access_policy: RoomAccessPolicy,
     /// Friend codes admitted to a friends-only room; ignored otherwise.
     pub allowed_friend_codes: Vec<String>,
@@ -73,6 +76,11 @@ impl PresenterConfig {
             max_capture: settings.max_capture_dimensions(),
             include_system_audio: settings.include_system_audio,
             force_relay: settings.always_relay,
+            video_codecs: settings
+                .codec_ranking
+                .iter()
+                .filter_map(|id| VideoCodecId::parse(id))
+                .collect(),
             access_policy: RoomAccessPolicy::Public,
             allowed_friend_codes: Vec::new(),
             auto_approve: true,
@@ -365,7 +373,7 @@ async fn run(
             } else {
                 AudioCapture::Disabled
             },
-            video_codec: VideoCodecPreference::Auto,
+            video_codecs: config.video_codecs.clone(),
             frame_rate: config.profile.fps(),
             capture_ceiling: Some(config.max_capture),
             bitrate_kbps: bitrate_for(config.profile),

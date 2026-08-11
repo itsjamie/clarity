@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use clarity_media::{
     AudioCapture, Broadcast, BroadcastConfig, BroadcastError, BroadcastEvent, ConnectionState,
-    EncoderSettings, FrameSink, SenderStats, SourceConfig, VideoCodecPreference,
+    EncoderSettings, FrameSink, SenderStats, SourceConfig, VideoCodecId,
 };
 use clarity_protocol::{
     ChatMessage, ClientMessage, ErrorCode, PROTOCOL_VERSION, PeerSnapshot, RoomSnapshot,
@@ -39,7 +39,10 @@ pub struct PresenterSessionConfig {
     /// What sound accompanies the picture; an uncapturable audio source
     /// downgrades to video-only with a log line rather than failing.
     pub audio: AudioCapture,
-    pub video_codec: VideoCodecPreference,
+    /// Ranked codec preference for the offer, best first; empty means the
+    /// media engine's default order. Codecs without an installed encoder are
+    /// skipped.
+    pub video_codecs: Vec<VideoCodecId>,
     /// The maximum capture/encode frame rate in fps (the profile's 30 or 60).
     pub frame_rate: u32,
     /// The largest frame (width, height) fed to the encoders; a bigger
@@ -186,7 +189,7 @@ pub struct PresenterSession {
     /// The presenter's self-preview sink, handed to the broadcast at start.
     preview_frames: Option<FrameSink>,
     audio: AudioCapture,
-    video_codec: VideoCodecPreference,
+    video_codecs: Vec<VideoCodecId>,
     frame_rate: u32,
     capture_ceiling: Option<(u32, u32)>,
     bitrate_kbps: u32,
@@ -257,7 +260,7 @@ impl PresenterSession {
             source: config.source,
             preview_frames: config.preview_frames,
             audio: config.audio,
-            video_codec: config.video_codec,
+            video_codecs: config.video_codecs,
             frame_rate: config.frame_rate,
             capture_ceiling: config.capture_ceiling,
             bitrate_kbps: config.bitrate_kbps,
@@ -519,7 +522,7 @@ impl PresenterSession {
                         let (broadcast, events) = Broadcast::start(BroadcastConfig {
                             source,
                             audio: self.audio.clone(),
-                            video_codec: self.video_codec,
+                            video_codecs: self.video_codecs.clone(),
                             frame_rate: self.frame_rate,
                             ice: ice_configuration,
                             force_relay: self.force_relay,

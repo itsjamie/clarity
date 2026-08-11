@@ -20,5 +20,5 @@ pub mod viewer;
 pub use clarity_media::{
     AudioCapture, CaptureError, CaptureRequest, CaptureStream, ConnectionState, FrameSink,
     NativeHandle, NativeVideoSurface, SenderStats, SourceConfig, StreamStats, SyntheticSource,
-    VideoCodecPreference, VideoFrame,
+    VideoCodecCapability, VideoCodecId, VideoFrame, video_codec_inventory,
 };

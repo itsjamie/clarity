@@ -45,6 +45,12 @@ pub struct Settings {
     pub max_capture: String,
     pub include_system_audio: bool,
     pub always_relay: bool,
+    /// Video codec preference for sharing, best first, as stable lowercase
+    /// ids (`av1`, `h265`, `h264`, `vp9`, `vp8`). Every ranked codec the
+    /// machine can encode is offered; the viewer's answer picks the first it
+    /// can decode. An empty list means the engine's default order. Unknown
+    /// ids are ignored, so a newer build's ranking loads harmlessly here.
+    pub codec_ranking: Vec<String>,
 }
 
 impl Settings {
@@ -71,6 +77,7 @@ impl Default for Settings {
             max_capture: "2560 × 1440".to_owned(),
             include_system_audio: true,
             always_relay: false,
+            codec_ranking: Vec::new(),
         }
     }
 }
@@ -86,6 +93,12 @@ mod tests {
         assert!(settings.always_relay);
         assert_eq!(settings.signaling_server, Settings::default().signaling_server);
         assert_eq!(settings.capture_profile, CaptureProfile::Text);
+    }
+
+    #[test]
+    fn codec_ranking_defaults_to_empty() {
+        let settings: Settings = serde_json::from_str("{}").expect("parse");
+        assert!(settings.codec_ranking.is_empty());
     }
 
     #[test]

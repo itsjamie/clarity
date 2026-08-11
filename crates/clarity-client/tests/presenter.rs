@@ -18,7 +18,7 @@ use clarity_client::viewer::{
     EndReason, ViewerCommand, ViewerError, ViewerPhase, ViewerSession, ViewerSessionConfig,
     ViewerUpdate,
 };
-use clarity_client::{AudioCapture, SourceConfig, SyntheticSource, VideoCodecPreference};
+use clarity_client::{AudioCapture, SourceConfig, SyntheticSource, VideoCodecId};
 use clarity_core::{RoomActorConfig, TurnConfig};
 use clarity_protocol::{CreateRoomResponse, RoomAccessPolicy, SharingState};
 use clarity_server::{AppConfig, AppState, build_router, config::Environment};
@@ -186,7 +186,7 @@ fn start_presenter(
             origin: endpoints.origin.clone(),
             source,
             audio: AudioCapture::Disabled,
-            video_codec: VideoCodecPreference::Vp8,
+            video_codecs: vec![VideoCodecId::Vp8],
             frame_rate: 15,
             capture_ceiling: None,
             bitrate_kbps: 1_000,
