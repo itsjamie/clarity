@@ -920,3 +920,96 @@ async fn idle_then_replace_source_resumes_on_the_same_connection() {
     playback.close();
     drain();
 }
+
+/// The desktop flow that regressed: a room opened idle with system audio kept
+/// the silent placeholder head for the whole broadcast, so going live
+/// streamed the placeholder (then a test tone) instead of the real monitor.
+/// The audio head must follow the source across `replace_source`, and the
+/// swap must not disturb media or chat on the negotiated connection.
+#[tokio::test]
+async fn audio_head_follows_the_source_out_of_idle() {
+    unsafe { std::env::set_var("CLARITY_MEDIA_HEADLESS", "1") };
+
+    let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
+        source: SourceConfig::Idle,
+        audio: AudioCapture::SystemMix,
+        video_codec: VideoCodecPreference::Vp8,
+        frame_rate: 30,
+        ice: empty_ice(),
+        force_relay: false,
+        preview_frames: None,
+        capture_ceiling: None,
+    }) {
+        Ok(started) => started,
+        Err(_) => return,
+    };
+    assert!(
+        broadcast.has_audio(),
+        "an idle-opened broadcast still negotiates an audio leg"
+    );
+    broadcast
+        .add_viewer(
+            VIEWER,
+            EncoderSettings {
+                bitrate_kbps: 500,
+                adaptive: false,
+            },
+        )
+        .expect("viewer branch builds");
+    let sink: clarity_media::FrameSink = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (playback, mut playback_events) = Playback::start(PlaybackConfig {
+        frames: Some(sink.clone()),
+        native: None,
+        ice: empty_ice(),
+        force_relay: false,
+    })
+    .expect("playback starts");
+
+    pump_until(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+        "idle placeholder frames",
+        || frame_size_is(&sink, 640, 360),
+    )
+    .await;
+
+    // Going live swaps both heads: video to the new source, audio from the
+    // idle silence to the mode's capture. The synthetic mode's head is the
+    // development tone, standing in for `pulsesrc` which needs an audio
+    // server this test cannot assume.
+    broadcast
+        .replace_source(SourceConfig::Synthetic(SyntheticSource {
+            width: 320,
+            height: 240,
+            frame_rate: 15,
+        }))
+        .expect("going live");
+    pump_until(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+        "frames after going live",
+        || frame_size_is(&sink, 320, 240),
+    )
+    .await;
+
+    // The audio-head swap must not have disturbed the data channel either.
+    exchange_chat(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        "audio-swap-host",
+        "audio-swap-viewer",
+    )
+    .await;
+
+    broadcast.close();
+    playback.close();
+    drain();
+}

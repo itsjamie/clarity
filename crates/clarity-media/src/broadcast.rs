@@ -272,7 +272,9 @@ pub enum SourceConfig {
 pub enum AudioCapture {
     Disabled,
     /// Everything the presenter hears — the default output's monitor for a
-    /// real capture, a soft test tone for the synthetic source.
+    /// real capture, a soft test tone for the synthetic source, and silence
+    /// while idle. The head follows the video source across swaps, so a
+    /// broadcast opened idle picks up the real monitor when sharing starts.
     SystemMix,
     /// Capture and mix specific playback streams, each a PipeWire target
     /// object (object serial or node name). One target shares a single
@@ -403,6 +405,37 @@ pub struct Broadcast {
     /// compositor stream, so it is swapped together with the source head and
     /// released entirely while idle.
     capture: Mutex<Option<CaptureStream>>,
+    /// The replaceable audio-capture elements, output element last, up to
+    /// (not including) the fixed audio tail. Empty when the broadcast has no
+    /// audio chain.
+    audio_head: Mutex<Vec<gst::Element>>,
+    /// First element of the fixed audio tail (`audioconvert`); a replacement
+    /// audio head links into it. `None` when the broadcast has no audio.
+    audio_tail_input: Option<gst::Element>,
+    /// What the audio head captures when a source is live, rebuilt on every
+    /// source swap.
+    audio_config: AudioCapture,
+}
+
+/// Which audio head accompanies the current video source. The idle
+/// placeholder is always silence and holds no capture of any kind; the
+/// synthetic source keeps its soft test tone for `SystemMix` so the audio
+/// path stays audible in development.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AudioHeadMode {
+    Capture,
+    Synthetic,
+    Idle,
+}
+
+impl AudioHeadMode {
+    fn of(source: &SourceConfig) -> Self {
+        match source {
+            SourceConfig::Screen(_) => Self::Capture,
+            SourceConfig::Synthetic(_) => Self::Synthetic,
+            SourceConfig::Idle => Self::Idle,
+        }
+    }
 }
 
 struct Shared {
@@ -415,10 +448,6 @@ struct Shared {
     video_codec: VideoCodec,
     force_relay: bool,
     paused: AtomicBool,
-    /// Whether the idle placeholder is the current source. While idle the
-    /// audio valves are held shut: nothing the presenter hears leaves the
-    /// machine when they are not sharing.
-    idle: AtomicBool,
     ended: AtomicBool,
 }
 
@@ -483,7 +512,6 @@ impl Broadcast {
             video_codec,
             force_relay: config.force_relay,
             paused: AtomicBool::new(false),
-            idle: AtomicBool::new(matches!(config.source, SourceConfig::Idle)),
             ended: AtomicBool::new(false),
         });
 
@@ -495,6 +523,7 @@ impl Broadcast {
         // timestamps must come from the same clock the RTP stack paces by.
         pipeline.use_clock(Some(&gst::SystemClock::obtain()));
         let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
+        let audio_mode = AudioHeadMode::of(&config.source);
         let (head, capture) = build_source_head(config.source)?;
         // The source's frames are normalized once, ahead of the tee: converted
         // out of the capture buffer pool immediately (compositors stop
@@ -600,12 +629,16 @@ impl Broadcast {
                 .map_err(|_| BroadcastError::Start("the preview branch could not link".into()))?;
         }
 
-        let audio_tee = match build_audio_chain(&pipeline, &config.audio, capture.is_some()) {
-            Ok(tee) => tee,
+        let audio_chain = match build_audio_chain(&pipeline, &config.audio, audio_mode) {
+            Ok(chain) => chain,
             Err(reason) => {
                 tracing::warn!(%reason, "sharing without audio");
                 None
             }
+        };
+        let (audio_tee, audio_head, audio_tail_input) = match audio_chain {
+            Some(chain) => (Some(chain.tee), chain.head, Some(chain.tail_input)),
+            None => (None, Vec::new(), None),
         };
 
         pipeline
@@ -628,6 +661,9 @@ impl Broadcast {
                 normalize,
                 capture_ceiling,
                 capture: Mutex::new(capture),
+                audio_head: Mutex::new(audio_head),
+                audio_tail_input,
+                audio_config: config.audio,
             },
             receiver,
         ))
@@ -639,7 +675,7 @@ impl Broadcast {
     /// the caps-notify path renegotiates any resolution change downstream, so
     /// the per-viewer encoders and `webrtcbin` bins are never touched.
     pub fn replace_source(&self, source: SourceConfig) -> Result<(), BroadcastError> {
-        let idle = matches!(source, SourceConfig::Idle);
+        let audio_mode = AudioHeadMode::of(&source);
         let (new_head, new_capture) = build_source_head(source)?;
         let raw_format = self.shared.video_codec.raw_format();
         {
@@ -690,9 +726,79 @@ impl Broadcast {
         // The old grant is revoked here, after the pipeline stopped reading
         // from it; while idle no capture exists at all.
         *self.capture.lock().expect("capture lock") = new_capture;
-        self.shared.idle.store(idle, Ordering::SeqCst);
-        self.refresh_valves();
+        // The audio head follows the video source: real capture audio only
+        // while a capture is live, silence while idle. Without this the head
+        // picked at start (silence for an idle-opened room) would keep
+        // playing for the whole broadcast.
+        self.replace_audio_head(audio_mode);
         Ok(())
+    }
+
+    /// Swaps the audio head to match the current source, mirroring the video
+    /// swap: park, unlink, dismantle, rebuild, relink. A head that cannot be
+    /// built (a missing audio server, a vanished application stream) degrades
+    /// to the silent placeholder rather than failing the source swap — the
+    /// video went through, and audio downgrade is this crate's contract.
+    fn replace_audio_head(&self, mode: AudioHeadMode) {
+        let Some(tail_input) = &self.audio_tail_input else {
+            return;
+        };
+        let mut head = self.audio_head.lock().expect("audio head lock");
+        let old_head = std::mem::take(&mut *head);
+        if let Some(head_src) = old_head.last().and_then(|element| element.static_pad("src")) {
+            // Same parking dance as the video head: the streaming thread must
+            // be off the tail before anything is unlinked.
+            let (parked, wait_parked) = std::sync::mpsc::channel::<()>();
+            head_src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
+                let _ = parked.send(());
+                gst::PadProbeReturn::Ok
+            });
+            let _ = wait_parked.recv_timeout(Duration::from_secs(1));
+            if let Some(peer) = head_src.peer() {
+                let _ = head_src.unlink(&peer);
+            }
+        }
+        // Null downstream-first, exactly as in `replace_source`: flushing the
+        // probed pad releases the parked thread so upstream elements can stop.
+        for element in old_head.iter().rev() {
+            let _ = element.set_state(gst::State::Null);
+        }
+        let _ = self.pipeline.remove_many(&old_head);
+
+        let attach = |mode: AudioHeadMode| -> Result<Vec<gst::Element>, String> {
+            let elements = build_audio_head(&self.pipeline, &self.audio_config, mode)?;
+            let result = (|| {
+                let output = elements.last().ok_or("the audio head is empty")?;
+                output.link(tail_input).map_err(|error| error.to_string())?;
+                for element in elements.iter().rev() {
+                    element
+                        .sync_state_with_parent()
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => Ok(elements),
+                Err(reason) => {
+                    for element in elements.iter().rev() {
+                        let _ = element.set_state(gst::State::Null);
+                    }
+                    let _ = self.pipeline.remove_many(&elements);
+                    Err(reason)
+                }
+            }
+        };
+        match attach(mode).or_else(|reason| {
+            tracing::warn!(%reason, "audio capture unavailable; sending silence");
+            attach(AudioHeadMode::Idle)
+        }) {
+            Ok(elements) => *head = elements,
+            Err(reason) => {
+                // No head at all: the tail runs starved and viewers get
+                // silence. Nothing to dismantle later.
+                tracing::warn!(%reason, "the audio head could not be rebuilt; audio is silent");
+            }
+        }
     }
 
     /// Swaps the current source out for the internal idle placeholder and
@@ -810,12 +916,13 @@ impl Broadcast {
                 .property("max-size-time", 0u64)
                 .build()
                 .map_err(|_| BroadcastError::Viewer("`queue` is unavailable".into()))?;
+            // The valve serves pause only. While idle the head itself is
+            // silence with no capture behind it, and the silence must flow:
+            // a valve shut from birth starves the encoder of buffers, caps
+            // never reach `webrtcbin`'s audio pad, and the offer for a
+            // viewer joining an idle room is never created.
             let audio_valve = build("valve")?;
-            audio_valve.set_property(
-                "drop",
-                self.shared.paused.load(Ordering::SeqCst)
-                    || self.shared.idle.load(Ordering::SeqCst),
-            );
+            audio_valve.set_property("drop", self.shared.paused.load(Ordering::SeqCst));
             let audio_encoder = build("opusenc")?;
             audio_encoder.set_property("bitrate", 128_000_i32);
             // In-band FEC carries recovery data for the previous packet, but
@@ -1115,12 +1222,11 @@ impl Broadcast {
     /// machine when they are not sharing.
     fn refresh_valves(&self) {
         let paused = self.shared.paused.load(Ordering::SeqCst);
-        let idle = self.shared.idle.load(Ordering::SeqCst);
         let viewers = self.shared.viewers.lock().expect("viewer lock");
         for entry in viewers.values() {
             entry.video_valve.set_property("drop", paused);
             if let Some(audio_valve) = &entry.audio_valve {
-                audio_valve.set_property("drop", paused || idle);
+                audio_valve.set_property("drop", paused);
             }
         }
     }
@@ -1689,11 +1795,21 @@ fn dismantle_branch(pipeline: &gst::Pipeline, branch: &[gst::Element]) {
 /// default output's monitor) for a real capture, a quiet tone for the
 /// synthetic source. Normalized to the one format the Opus encoders consume
 /// so per-viewer branches do no conversion work.
+/// The audio side of the pipeline: the fixed tail's tee feeding per-viewer
+/// legs, plus the swappable head and the tail element it links into, so
+/// [`Broadcast::replace_audio_head`] can rebuild the head when the video
+/// source changes.
+struct AudioChain {
+    tee: gst::Element,
+    head: Vec<gst::Element>,
+    tail_input: gst::Element,
+}
+
 fn build_audio_chain(
     pipeline: &gst::Pipeline,
     audio: &AudioCapture,
-    live_capture: bool,
-) -> Result<Option<gst::Element>, String> {
+    mode: AudioHeadMode,
+) -> Result<Option<AudioChain>, String> {
     if matches!(audio, AudioCapture::Disabled) {
         return Ok(None);
     }
@@ -1707,9 +1823,9 @@ fn build_audio_chain(
             return Err(format!("the audio component `{element}` is unavailable"));
         }
     }
-    // A head element whose src pad carries the captured audio: a single source
-    // directly, or an audiomixer summing several tapped streams.
-    let head = build_audio_head(pipeline, audio, live_capture)?;
+    // Head elements whose last member's src pad carries the captured audio: a
+    // single source directly, or an audiomixer summing several tapped streams.
+    let head = build_audio_head(pipeline, audio, mode)?;
     let convert = make_audio("audioconvert")?;
     let resample = make_audio("audioresample")?;
     let normalize = gst::ElementFactory::make("capsfilter")
@@ -1731,8 +1847,15 @@ fn build_audio_chain(
         .add_many(&tail)
         .map_err(|error| error.to_string())?;
     gst::Element::link_many(&tail).map_err(|error| error.to_string())?;
-    head.link(&tail[0]).map_err(|error| error.to_string())?;
-    Ok(Some(tee))
+    head.last()
+        .ok_or("the audio head is empty")?
+        .link(&tail[0])
+        .map_err(|error| error.to_string())?;
+    Ok(Some(AudioChain {
+        tee,
+        head,
+        tail_input: tail[0].clone(),
+    }))
 }
 
 fn make_audio(name: &'static str) -> Result<gst::Element, String> {
@@ -1741,14 +1864,27 @@ fn make_audio(name: &'static str) -> Result<gst::Element, String> {
         .map_err(|_| format!("the audio component `{name}` is unavailable"))
 }
 
+/// Builds the head for the given mode and adds its elements to the pipeline,
+/// returning them with the output element last. While idle every variant is
+/// a silent placeholder: no audio device or application stream is tapped at
+/// all when nothing is being shared.
 fn build_audio_head(
     pipeline: &gst::Pipeline,
     audio: &AudioCapture,
-    live_capture: bool,
-) -> Result<gst::Element, String> {
+    mode: AudioHeadMode,
+) -> Result<Vec<gst::Element>, String> {
+    if mode == AudioHeadMode::Idle {
+        let source = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property_from_str("wave", "silence")
+            .build()
+            .map_err(|error| error.to_string())?;
+        pipeline.add(&source).map_err(|error| error.to_string())?;
+        return Ok(vec![source]);
+    }
     match audio {
         AudioCapture::Disabled => unreachable!("handled by the caller"),
-        AudioCapture::SystemMix if live_capture => {
+        AudioCapture::SystemMix if mode == AudioHeadMode::Capture => {
             // "@DEFAULT_MONITOR@" resolves server-side to the monitor of the
             // current default output, following device switches.
             let source = gst::ElementFactory::make("pulsesrc")
@@ -1756,9 +1892,11 @@ fn build_audio_head(
                 .build()
                 .map_err(|error| error.to_string())?;
             pipeline.add(&source).map_err(|error| error.to_string())?;
-            Ok(source)
+            Ok(vec![source])
         }
         AudioCapture::SystemMix => {
+            // The synthetic source's soft development tone: audible proof the
+            // audio path works without tapping a real device.
             let source = gst::ElementFactory::make("audiotestsrc")
                 .property("is-live", true)
                 .property("volume", 0.05_f64)
@@ -1766,18 +1904,19 @@ fn build_audio_head(
                 .build()
                 .map_err(|error| error.to_string())?;
             pipeline.add(&source).map_err(|error| error.to_string())?;
-            Ok(source)
+            Ok(vec![source])
         }
         AudioCapture::Streams { targets } if targets.len() == 1 => {
             let source = application_source(&targets[0])?;
             pipeline.add(&source).map_err(|error| error.to_string())?;
-            Ok(source)
+            Ok(vec![source])
         }
         AudioCapture::Streams { targets } => {
             let mixer = gst::ElementFactory::make("audiomixer")
                 .build()
                 .map_err(|_| "the audio component `audiomixer` is unavailable".to_owned())?;
             pipeline.add(&mixer).map_err(|error| error.to_string())?;
+            let mut elements = Vec::with_capacity(targets.len() * 4 + 1);
             // Each tapped stream is converted to a common rate and channel
             // layout before the mixer, which requires matching input caps.
             for target in targets {
@@ -1800,8 +1939,11 @@ fn build_audio_head(
                 leg[leg.len() - 1]
                     .link(&mixer)
                     .map_err(|error| error.to_string())?;
+                elements.extend(leg);
             }
-            Ok(mixer)
+            // The mixer is the head's output and must stay last.
+            elements.push(mixer);
+            Ok(elements)
         }
     }
 }
