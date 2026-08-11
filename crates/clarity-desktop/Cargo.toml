@@ -1,0 +1,25 @@
+[package]
+name = "clarity-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clarity-client = { path = "../clarity-client" }
+clarity-core = { path = "../clarity-core" }
+clarity-identity = { path = "../clarity-identity" }
+clarity-protocol = { path = "../clarity-protocol" }
+eframe = "0.36"
+egui = "0.36"
+egui_extras = { version = "0.36", features = ["svg"] }
+png = "0.17"
+raw-window-handle = "0.6"
+secrecy = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[[bin]]
+name = "clarity-gui"
+path = "src/main.rs"
