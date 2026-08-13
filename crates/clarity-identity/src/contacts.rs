@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::now_unix;
 
+/// How long an unaccepted invite lives, mirroring the server's request TTL
+/// so the invite disappears for both sides on roughly the same clock.
+pub const INVITE_TTL_SECONDS: u64 = 10 * 60;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ContactError {
     #[error("that is not a valid friend code")]
@@ -76,6 +80,24 @@ impl Contacts {
         }
     }
 
+    /// Drops pending contacts whose invite has aged out
+    /// ([`INVITE_TTL_SECONDS`]); `true` when any were dropped. Adding a
+    /// friend is something both people do in the moment, so an unanswered
+    /// invite disappears instead of waiting forever; removing the contact
+    /// also shrinks the presence subscription, withdrawing the request
+    /// server-side. A pending contact with no recorded `added_at` (older
+    /// data) is left alone rather than dropped on an unknown age.
+    pub fn expire_invites(&mut self) -> bool {
+        let before = self.contacts.len();
+        self.contacts.retain(|contact| {
+            !contact.pending
+                || contact
+                    .added_seconds_ago()
+                    .is_none_or(|age| age < INVITE_TTL_SECONDS)
+        });
+        self.contacts.len() != before
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Contact> {
         self.contacts.iter()
     }
@@ -117,6 +139,46 @@ mod tests {
     /// illustrative only — `8` is not in the base32 alphabet).
     fn a_code() -> String {
         crate::code::encode(&[5u8; 32])
+    }
+
+    #[test]
+    fn expires_only_aged_pending_invites() {
+        let mut contacts = Contacts::default();
+        let aged = now_unix() - INVITE_TTL_SECONDS - 1;
+        contacts.contacts = vec![
+            // An unanswered invite past the TTL: dropped.
+            Contact {
+                code: "clr-OLD1-OLD1".into(),
+                name: "Aged".into(),
+                added_at: aged,
+                pending: true,
+            },
+            // A confirmed friend, however old: kept.
+            Contact {
+                code: "clr-OLD2-OLD2".into(),
+                name: "Friend".into(),
+                added_at: aged,
+                pending: false,
+            },
+            // A fresh invite: kept.
+            Contact {
+                code: "clr-NEW1-NEW1".into(),
+                name: "Fresh".into(),
+                added_at: now_unix(),
+                pending: true,
+            },
+            // Pending with no recorded age (pre-`added_at` data): kept.
+            Contact {
+                code: "clr-NOAG-NOAG".into(),
+                name: "Legacy".into(),
+                added_at: 0,
+                pending: true,
+            },
+        ];
+        assert!(contacts.expire_invites());
+        let codes: Vec<&str> = contacts.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(codes, ["clr-OLD2-OLD2", "clr-NEW1-NEW1", "clr-NOAG-NOAG"]);
+        assert!(!contacts.expire_invites());
     }
 
     #[test]

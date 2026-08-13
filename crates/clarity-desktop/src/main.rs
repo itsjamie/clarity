@@ -145,6 +145,7 @@ impl ClarityApp {
             link.sync(presence::contact_codes(&self.state.store));
         }
         self.confirm_seen_contacts();
+        self.expire_invites();
     }
 
     /// Marks pending contacts confirmed once presence reveals them. The server
@@ -166,6 +167,16 @@ impl ClarityApp {
             }
         }
         if confirmed_any {
+            let _ = self.state.store.persist_contacts();
+        }
+    }
+
+    /// Drops pending invites that have aged out. The next frame's
+    /// [`presence::PresenceLink::sync`] sees the smaller contact set and
+    /// resubscribes, which withdraws the request server-side; the web client
+    /// sweeps on the same TTL.
+    fn expire_invites(&mut self) {
+        if self.state.store.contacts.expire_invites() {
             let _ = self.state.store.persist_contacts();
         }
     }

@@ -32,6 +32,13 @@ use crate::clock::format_time;
 /// per device); it counts as online while any remain.
 pub type SessionId = u64;
 
+/// How long an unaccepted friend request stands. Adding a friend is something
+/// both people do in the moment; an invite the other side has not answered
+/// within this window ages out instead of waiting forever. The clients drop
+/// their pending contact on the same clock, so the two sides agree to within
+/// the sweep interval. Mutual interest — an accepted request — never expires.
+pub const REQUEST_TTL: time::Duration = time::Duration::minutes(10);
+
 /// The outbound half of one presence connection.
 pub type PresenceHandle = mpsc::Sender<PresenceServerMessage>;
 
@@ -118,19 +125,22 @@ struct Session {
 /// session dropped; it is in-memory only and lost on restart.
 ///
 /// `standing` records standing interest: requester code → the codes it
-/// subscribes to. Unlike a session's subscriptions it survives disconnects,
-/// so a friend request (a one-sided entry) can still be shown when the target
-/// connects after the requester left. Each subscribe replaces the identity's
-/// whole entry with the union of its live sessions' sets, so a contact
-/// removed while offline is withdrawn on the next connect — a session-diff
-/// would let an entry from a dead session linger forever. Like `last_seen` it
-/// is lost on restart, but every client resubscribes its full contact set on
-/// connect, so it self-heals.
+/// subscribes to, each with the time the interest was first asserted. Unlike
+/// a session's subscriptions it survives disconnects, so a friend request (a
+/// one-sided entry) can still be shown when the target connects after the
+/// requester left. Each subscribe replaces the identity's whole entry with
+/// the union of its live sessions' sets, so a contact removed while offline
+/// is withdrawn on the next connect — a session-diff would let an entry from
+/// a dead session linger forever. One-sided entries age out after
+/// [`REQUEST_TTL`]; mutual ones persist, which also means dropping an old
+/// friend never resurfaces their long-expired interest as a fresh invite.
+/// Like `last_seen` it is lost on restart, but every client resubscribes its
+/// full contact set on connect, so it self-heals.
 #[derive(Default)]
 pub struct PresenceState {
     sessions: HashMap<SessionId, Session>,
     last_seen: HashMap<String, OffsetDateTime>,
-    standing: HashMap<String, HashSet<String>>,
+    standing: HashMap<String, HashMap<String, OffsetDateTime>>,
 }
 
 impl PresenceState {
@@ -188,13 +198,29 @@ impl PresenceState {
             .filter(|session| session.code == code)
             .flat_map(|session| session.subscriptions.iter().cloned())
             .collect();
-        let old_standing = self.standing.get(&code).cloned().unwrap_or_default();
-        let added: Vec<String> = union.difference(&old_standing).cloned().collect();
-        let removed: Vec<String> = old_standing.difference(&union).cloned().collect();
-        if union.is_empty() {
-            self.standing.remove(&code);
-        } else {
-            self.standing.insert(code.clone(), union);
+        let mut old_standing = self.standing.remove(&code).unwrap_or_default();
+        let added: Vec<String> = union
+            .iter()
+            .filter(|target| !old_standing.contains_key(*target))
+            .cloned()
+            .collect();
+        let removed: Vec<String> = old_standing
+            .keys()
+            .filter(|target| !union.contains(*target))
+            .cloned()
+            .collect();
+        if !union.is_empty() {
+            // A re-asserted target keeps its original timestamp, so a client
+            // reconnecting cannot keep an unanswered invite alive past the
+            // TTL; only a genuinely new add starts the clock.
+            let fresh: HashMap<String, OffsetDateTime> = union
+                .into_iter()
+                .map(|target| {
+                    let asserted = old_standing.remove(&target).unwrap_or(now);
+                    (target, asserted)
+                })
+                .collect();
+            self.standing.insert(code.clone(), fresh);
         }
 
         let friends: Vec<FriendPresence> = now_visible
@@ -202,7 +228,7 @@ impl PresenceState {
             .map(|peer| self.presence_of(peer, now))
             .collect();
         self.send_to_code(&code, snapshot(friends, now));
-        self.send_to_code(&code, requests(self.requests_of(&code), now));
+        self.send_to_code(&code, requests(self.requests_of(&code, now), now));
 
         // Peers whose view of this identity changed: newly-mutual peers learn it
         // is here; no-longer-mutual peers see it drop away.
@@ -219,7 +245,7 @@ impl PresenceState {
         // may have gained or lost this code, so push the recomputed set.
         for target in added.iter().chain(&removed) {
             if target != &code {
-                self.send_to_code(target, requests(self.requests_of(target), now));
+                self.send_to_code(target, requests(self.requests_of(target, now), now));
             }
         }
     }
@@ -366,26 +392,69 @@ impl PresenceState {
         }
     }
 
-    /// The codes wanting `code` without reciprocation — its pending friend
-    /// requests. Judged on `standing` (not live sessions), so a request
-    /// stands while the requester is offline and clears the moment `code`
-    /// subscribes back, online or not. The scan over all standing entries is
-    /// proportional to the identities with contacts, which the subscription
-    /// cap keeps bounded. Sorted, so pushes are deterministic.
-    fn requests_of(&self, code: &str) -> Vec<String> {
+    /// The codes wanting `code` without reciprocation and within
+    /// [`REQUEST_TTL`] — its pending friend requests. Judged on `standing`
+    /// (not live sessions), so a request stands while the requester is
+    /// offline and clears the moment `code` subscribes back, online or not.
+    /// The scan over all standing entries is proportional to the identities
+    /// with contacts, which the subscription cap keeps bounded. Sorted, so
+    /// pushes are deterministic.
+    fn requests_of(&self, code: &str, now: OffsetDateTime) -> Vec<String> {
         let reciprocated = self.standing.get(code);
         let mut codes: Vec<String> = self
             .standing
             .iter()
             .filter(|(requester, targets)| {
                 requester.as_str() != code
-                    && targets.contains(code)
-                    && !reciprocated.is_some_and(|wanted| wanted.contains(requester.as_str()))
+                    && targets
+                        .get(code)
+                        .is_some_and(|asserted| now - *asserted < REQUEST_TTL)
+                    && !reciprocated.is_some_and(|wanted| wanted.contains_key(requester.as_str()))
             })
             .map(|(requester, _)| requester.clone())
             .collect();
         codes.sort();
         codes
+    }
+
+    /// Drops one-sided standing entries older than [`REQUEST_TTL`] and pushes
+    /// the emptied request sets to affected targets that are online, so an
+    /// invite whose sender never returned still disappears on time. Mutual
+    /// entries are a friendship, not a request, and are left alone. Driven by
+    /// the registry's periodic sweep; `requests_of` filters by age anyway, so
+    /// the sweep only affects when the withdrawal becomes visible and when
+    /// the memory is reclaimed.
+    pub fn expire_requests(&mut self, now: OffsetDateTime) {
+        let expired: Vec<(String, String)> = self
+            .standing
+            .iter()
+            .flat_map(|(requester, targets)| {
+                targets
+                    .iter()
+                    .filter(|(target, asserted)| {
+                        let mutual = self
+                            .standing
+                            .get(*target)
+                            .is_some_and(|wanted| wanted.contains_key(requester.as_str()));
+                        !mutual && now - **asserted >= REQUEST_TTL
+                    })
+                    .map(|(target, _)| (requester.clone(), target.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut affected: HashSet<String> = HashSet::new();
+        for (requester, target) in expired {
+            if let Some(targets) = self.standing.get_mut(&requester) {
+                targets.remove(&target);
+                if targets.is_empty() {
+                    self.standing.remove(&requester);
+                }
+            }
+            affected.insert(target);
+        }
+        for target in affected {
+            self.send_to_code(&target, requests(self.requests_of(&target, now), now));
+        }
     }
 
     /// Seconds since the identity's last session dropped; `None` while online
@@ -463,6 +532,8 @@ enum PresenceCommand {
     Disconnect {
         id: SessionId,
     },
+    /// The periodic request sweep; see [`PresenceState::expire_requests`].
+    Expire,
     Shutdown,
 }
 
@@ -477,6 +548,19 @@ impl PresenceRegistry {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         let (commands, receiver) = mpsc::channel(256);
         tokio::spawn(run_presence_actor(receiver, clock));
+        // The request sweep: much finer than the TTL it enforces, so an
+        // invite disappears close to on time. Ends itself when the actor
+        // drops its receiver.
+        let sweep = commands.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                if sweep.send(PresenceCommand::Expire).await.is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             commands,
             next_id: Arc::new(AtomicU64::new(1)),
@@ -549,6 +633,7 @@ async fn run_presence_actor(mut commands: mpsc::Receiver<PresenceCommand>, clock
             } => state.room_updated(&room_id, viewer_count, sharing_state, now),
             PresenceCommand::RoomClosed { room_id } => state.room_closed(&room_id, now),
             PresenceCommand::Disconnect { id } => state.disconnect(id, now),
+            PresenceCommand::Expire => state.expire_requests(now),
             PresenceCommand::Shutdown => break,
         }
     }
@@ -560,6 +645,11 @@ mod tests {
 
     fn at() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("valid time")
+    }
+
+    /// A moment past the request TTL, for aging invites out.
+    fn past_ttl() -> OffsetDateTime {
+        at() + REQUEST_TTL + time::Duration::seconds(1)
     }
 
     fn session() -> (PresenceHandle, mpsc::Receiver<PresenceServerMessage>) {
@@ -696,6 +786,81 @@ mod tests {
         // A cancels the invite by resubscribing without B.
         state.subscribe(1, Vec::new(), at());
         assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+    }
+
+    /// An invite is something done in the moment: unanswered past the TTL,
+    /// it no longer greets a target who connects later.
+    #[test]
+    fn an_unanswered_request_ages_out() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        state.disconnect(1, at());
+
+        let (b_tx, mut b_rx) = session();
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(2, Vec::new(), past_ttl());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+    }
+
+    /// The sweep pushes the withdrawal to a target already watching, so the
+    /// invite disappears on time even though the sender never came back.
+    #[test]
+    fn the_sweep_withdraws_an_aged_request_live() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        let (b_tx, mut b_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        state.subscribe(2, Vec::new(), at());
+        state.disconnect(1, at());
+        assert_eq!(last_requests(&mut b_rx), Some(vec![A.to_owned()]));
+
+        state.expire_requests(past_ttl());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+    }
+
+    /// A reconnect re-asserting the same contact keeps the original clock: a
+    /// client cannot keep an unanswered invite alive by resubscribing.
+    #[test]
+    fn resubscribing_does_not_restart_an_invite_clock() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        state.disconnect(1, at());
+
+        let (a_tx, _a_rx) = session();
+        state.connect(3, A.to_owned(), a_tx);
+        state.subscribe(3, vec![B.to_owned()], past_ttl());
+
+        let (b_tx, mut b_rx) = session();
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(2, Vec::new(), past_ttl());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+    }
+
+    /// Mutual interest is a friendship, not a request: the sweep leaves it
+    /// alone however old it is, and unfriending later must not resurface the
+    /// other side's long-expired interest as a fresh invite.
+    #[test]
+    fn an_accepted_pair_outlives_the_ttl_and_unfriending_invites_nobody() {
+        let mut state = PresenceState::new();
+        let (a_tx, mut a_rx) = session();
+        let (b_tx, mut b_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        state.subscribe(2, vec![A.to_owned()], at());
+        state.expire_requests(past_ttl());
+        assert_eq!(view(&mut b_rx).get(A).map(|p| p.online), Some(true));
+
+        // A drops B much later; B's interest in A is long past the TTL, so A
+        // sees no invite from the friend it just removed.
+        state.subscribe(1, Vec::new(), past_ttl());
+        assert_eq!(last_requests(&mut a_rx), Some(Vec::new()));
     }
 
     /// The phantom-invite regression: interest registered by a session that

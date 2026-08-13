@@ -19,7 +19,7 @@ mod identity;
 mod settings;
 mod store;
 
-pub use contacts::{Contact, ContactError, Contacts};
+pub use contacts::{Contact, ContactError, Contacts, INVITE_TTL_SECONDS};
 pub use identity::{Identity, IdentityError};
 pub use settings::{CaptureProfile, Settings};
 pub use store::{Store, StoreError};

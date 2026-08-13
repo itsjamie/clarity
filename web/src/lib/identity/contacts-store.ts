@@ -21,6 +21,15 @@ export interface ContactsState {
 
 const CONTACTS_KEY = 'clarity:contacts';
 
+/**
+ * How long an unaccepted invite lives. Adding a friend is something both
+ * people do in the moment; a contact the other side has not accepted within
+ * this window is dropped rather than left waiting forever. Mirrors the
+ * server's request TTL, so the invite disappears for both sides on roughly
+ * the same clock.
+ */
+export const INVITE_TTL_MS = 10 * 60 * 1000;
+
 export class ContactsStore implements ExternalStateStore<ContactsState> {
   readonly #listeners = new Set<() => void>();
   readonly #storage: Pick<Storage, 'getItem' | 'setItem'>;
@@ -73,6 +82,20 @@ export class ContactsStore implements ExternalStateStore<ContactsState> {
         contact.code === code ? { ...contact, confirmed: true } : contact,
       ),
     );
+  }
+
+  /**
+   * Drops unconfirmed contacts whose invite has aged out ([`INVITE_TTL_MS`]);
+   * `true` when any were dropped. Removing the contact shrinks the presence
+   * subscription, which withdraws the request server-side.
+   */
+  public expireInvites(now: number = Date.now()): boolean {
+    const kept = this.#state.contacts.filter(
+      (contact) => contact.confirmed || now - contact.addedAt < INVITE_TTL_MS,
+    );
+    if (kept.length === this.#state.contacts.length) return false;
+    this.#replace(kept);
+    return true;
   }
 
   /** The local name for a friend code, if it is a contact. */

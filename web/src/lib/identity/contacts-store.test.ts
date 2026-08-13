@@ -1,4 +1,4 @@
-import { ContactsStore } from './contacts-store';
+import { ContactsStore, INVITE_TTL_MS } from './contacts-store';
 
 describe('contacts store', () => {
   it('normalizes codes and starts contacts unconfirmed', () => {
@@ -49,6 +49,31 @@ describe('contacts store', () => {
     const storage = memoryStorage();
     storage.setItem('clarity:contacts', '{nonsense');
     expect(new ContactsStore(storage).getSnapshot().contacts).toEqual([]);
+  });
+
+  it('expires an unaccepted invite after its TTL, keeping friends and fresh invites', () => {
+    const store = new ContactsStore(memoryStorage());
+    const added = store.add('clr-JOYG-7DSO', 'Mara', null).addedAt;
+    store.add('clr-A5X2-Q4ZI', 'Rob', null);
+    store.confirm('clr-A5X2-Q4ZI');
+
+    // Just inside the window nothing changes; just past it the unaccepted
+    // invite is dropped while the confirmed friend stays, however old.
+    expect(store.expireInvites(added + INVITE_TTL_MS - 1)).toBe(false);
+    expect(store.expireInvites(added + INVITE_TTL_MS)).toBe(true);
+    expect(store.getSnapshot().contacts.map((contact) => contact.code)).toEqual([
+      'clr-A5X2-Q4ZI',
+    ]);
+    expect(store.expireInvites(added + INVITE_TTL_MS)).toBe(false);
+  });
+
+  it('notifies subscribers when an invite expires', () => {
+    const store = new ContactsStore(memoryStorage());
+    const added = store.add('clr-JOYG-7DSO', 'Mara', null).addedAt;
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.expireInvites(added + INVITE_TTL_MS);
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });
 

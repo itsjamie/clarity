@@ -8,6 +8,7 @@ import {
   identityStore,
   presenceStore,
 } from '@/lib/presence/presence-service';
+import { INVITE_TTL_MS } from '@/lib/identity/contacts-store';
 import { openRequests } from '@/lib/identity/dismissed-requests';
 import { initials } from '@/features/shell/lib/friend-rows';
 
@@ -101,7 +102,7 @@ export function FriendsRoute() {
                 </span>
                 <span className="friends-waiting__copy">
                   <strong>{contact.name || contact.code}</strong>
-                  <span>{contact.code} · sent {sentAgo(contact.addedAt, now)}</span>
+                  <span>{contact.code} · {expiresIn(contact.addedAt, now)}</span>
                 </span>
                 <button
                   type="button"
@@ -207,9 +208,13 @@ function AddFriendPanel({ ownCode }: { ownCode: string | null }) {
   );
 }
 
-function sentAgo(timestamp: number, now = Date.now()): string {
-  const seconds = Math.max(0, Math.floor((now - timestamp) / 1_000));
-  if (seconds < 3_600) return `${Math.max(1, Math.floor(seconds / 60))}m ago`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
-  return `${Math.floor(seconds / 86_400)}d ago`;
+/**
+ * The invite's remaining life, so the row explains its own later
+ * disappearance. Invites are answered in the moment or age out
+ * ([`INVITE_TTL_MS`]).
+ */
+function expiresIn(addedAt: number, now = Date.now()): string {
+  const remaining = addedAt + INVITE_TTL_MS - now;
+  if (remaining <= 60_000) return 'expires any moment';
+  return `expires in ${Math.round(remaining / 60_000)}m`;
 }

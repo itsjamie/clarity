@@ -869,13 +869,20 @@ pub fn friends(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let mut cancel = None;
                 for contact in &pending {
-                    // "code · sent 2h ago", falling back to "pending" for
-                    // contacts saved before the added-at field existed.
+                    // The remaining life, so the row explains its own later
+                    // disappearance; invites age out after the TTL. "pending"
+                    // covers contacts saved before the added-at field existed,
+                    // which never expire.
                     let meta = match contact.added_seconds_ago() {
-                        Some(seconds) => match clarity_core::ago_compact(seconds).as_str() {
-                            "now" => format!("{} · sent just now", contact.code),
-                            ago => format!("{} · sent {ago} ago", contact.code),
-                        },
+                        Some(seconds) => {
+                            let remaining =
+                                clarity_identity::INVITE_TTL_SECONDS.saturating_sub(seconds);
+                            if remaining <= 60 {
+                                format!("{} · expires any moment", contact.code)
+                            } else {
+                                format!("{} · expires in {}m", contact.code, remaining.div_ceil(60))
+                            }
+                        }
                         None => format!("{} · pending", contact.code),
                     };
                     if pending_invite(ui, pal, &contact.name, &meta) {

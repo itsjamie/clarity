@@ -53,6 +53,11 @@ export function ensurePresenceStarted(): void {
   if (started) return;
   started = true;
   contactsStore.subscribe(() => client?.setContacts(contactCodes()));
+  // Invites are meant to be answered in the moment: sweep aged-out pending
+  // contacts on start and periodically. The store subscription above then
+  // shrinks the presence subscription, withdrawing the request server-side.
+  contactsStore.expireInvites();
+  window.setInterval(() => contactsStore.expireInvites(), 30_000);
   void identityStore.load().then(() => {
     connectWhenReady();
     identityStore.subscribe(connectWhenReady);
