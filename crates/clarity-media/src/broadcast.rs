@@ -28,6 +28,12 @@ const IDLE_FRAME_RATE: i32 = 4;
 /// congestion estimate covers the whole transport, so this is subtracted
 /// before the remainder is given to the video encoder.
 const AUDIO_BITRATE_BPS: u32 = 128_000;
+/// The MediaStream id signalled for both tracks (the `msid` on each
+/// `webrtcbin` sink pad). Left unset, the audio falls back to the RTP cname
+/// and the video signals nothing until its ssrc is known, so a browser
+/// viewer sees the tracks arrive in two unrelated streams. One shared id
+/// groups them into a single remote MediaStream.
+const MEDIA_STREAM_ID: &str = "clarity-share";
 /// A floor that keeps screen content legible under mild congestion. The
 /// estimator can still drop here, but not to the point where text is unreadable.
 const VIDEO_MIN_KBPS: u32 = 600;
@@ -1275,6 +1281,7 @@ impl Broadcast {
             let audio_sink = webrtc.request_pad_simple("sink_1").ok_or_else(|| {
                 BroadcastError::Viewer("the connection rejected an audio stream".into())
             })?;
+            audio_sink.set_property("msid", MEDIA_STREAM_ID);
             audio_caps
                 .static_pad("src")
                 .expect("capsfilter has a src pad")
@@ -1435,6 +1442,34 @@ impl Broadcast {
         };
         match installed {
             Ok(installed) => {
+                // The renegotiation the pad request triggers is usually
+                // created before the first buffer traverses the new branch,
+                // so the video m-line goes out without its ssrc, and with it
+                // goes the msid that groups both tracks into one stream for
+                // browsers. Re-offer once when the caps actually reach the
+                // connection pad; the ssrc and `msid` are known by then.
+                if let Some(pad) = &installed.sink_pad {
+                    let shared = Arc::clone(&self.shared);
+                    let peer = peer_id.to_owned();
+                    let webrtc_hook = webrtc.clone();
+                    let offered = Arc::new(AtomicBool::new(false));
+                    let offered_hook = Arc::clone(&offered);
+                    pad.connect_notify(Some("caps"), move |pad, _| {
+                        if pad.current_caps().is_none()
+                            || offered_hook.swap(true, Ordering::SeqCst)
+                        {
+                            return;
+                        }
+                        negotiate(&webrtc_hook, &shared, &peer, false);
+                    });
+                    // The caps can land between linking and connecting the
+                    // handler; offer now if they already did.
+                    if pad.current_caps().is_some()
+                        && !offered.swap(true, Ordering::SeqCst)
+                    {
+                        negotiate(&webrtc, &self.shared, peer_id, false);
+                    }
+                }
                 let mut viewers = self.shared.viewers.lock().expect("viewer lock");
                 if let Some(entry) = viewers.get_mut(peer_id) {
                     *entry.rate_target.lock().expect("rate target lock") =
@@ -1504,6 +1539,7 @@ impl Broadcast {
         let sink_pad = webrtc
             .request_pad_simple("sink_0")
             .ok_or("the connection rejected the video stream")?;
+        sink_pad.set_property("msid", MEDIA_STREAM_ID);
         elements
             .last()
             .expect("the encode chain is never empty")

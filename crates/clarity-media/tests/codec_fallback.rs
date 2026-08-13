@@ -71,6 +71,7 @@ async fn falls_back_when_the_viewer_cannot_decode_the_top_codecs() {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut negotiated: Option<String> = None;
+    let mut first_offer = true;
     loop {
         if let Some(codec) = &negotiated {
             assert_eq!(codec, "H264", "the answer's pick drives the encoder");
@@ -80,10 +81,16 @@ async fn falls_back_when_the_viewer_cannot_decode_the_top_codecs() {
             _ = tokio::time::sleep_until(deadline) => panic!("fallback media did not flow"),
             event = broadcast_events.recv() => match event.expect("broadcast stays alive") {
                 BroadcastEvent::Offer { peer_id, sdp, .. } if peer_id == VIEWER => {
-                    // The offer must advertise the whole ranking; the denied
-                    // codecs are still offered, only the viewer drops them.
-                    assert!(sdp.contains("AV1"), "the offer advertises AV1");
-                    assert!(sdp.contains("H264"), "the offer advertises H264");
+                    // The initial offer must advertise the whole ranking; the
+                    // denied codecs are still offered, only the viewer drops
+                    // them. The re-offer that signals the stream ids once the
+                    // encode branch attaches is pinned to the negotiated
+                    // codec, so it advertises that codec alone.
+                    if first_offer {
+                        assert!(sdp.contains("AV1"), "the offer advertises AV1");
+                        assert!(sdp.contains("H264"), "the offer advertises H264");
+                        first_offer = false;
+                    }
                     playback.accept_offer(&sdp).expect("offer applies");
                 }
                 BroadcastEvent::IceCandidate { peer_id, candidate, sdp_m_line_index }
