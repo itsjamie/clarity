@@ -101,11 +101,12 @@ export class ScreenCaptureManager {
       const frameRate = mode === 'motion' ? 60 : 30;
       const options: ExtendedDisplayMediaOptions = {
         video: {
-          // Constrain the browser's native capture track instead of introducing a
-          // canvas copy and a second scaling step in the application.
-          width: { ideal: dimensions.width, max: dimensions.width },
-          height: { ideal: dimensions.height, max: dimensions.height },
-          frameRate: { ideal: frameRate, max: frameRate },
+          // Ideal-only constraints leave the browser free to keep the display's
+          // native resolution and frame rate; a hard max forces a downscale on
+          // screens that don't match the target exactly, softening text.
+          width: { ideal: dimensions.width },
+          height: { ideal: dimensions.height },
+          frameRate: { ideal: frameRate },
         },
         audio: includeAudio,
         windowAudio: includeAudio ? 'window' : 'exclude',

@@ -50,15 +50,15 @@ describe('ScreenCaptureManager', () => {
 
     const options = getDisplayMedia.mock.calls[0]?.[0];
     expect(options?.video).toEqual(expect.objectContaining({
-      width: { ideal: width, max: width },
-      height: { ideal: height, max: height },
+      width: { ideal: width },
+      height: { ideal: height },
     }));
   });
 
   it.each([
     ['text', 30],
     ['motion', 60],
-  ] as const)('caps %s capture at %i FPS before encoding', async (mode, frameRate) => {
+  ] as const)('targets %s capture at %i FPS on the native track', async (mode, frameRate) => {
     const getDisplayMedia = installDisplayCapture(createCaptureStream(false));
     const manager = new ScreenCaptureManager(vi.fn());
 
@@ -66,7 +66,7 @@ describe('ScreenCaptureManager', () => {
 
     const options = getDisplayMedia.mock.calls[0]?.[0];
     expect(options?.video).toEqual(expect.objectContaining({
-      frameRate: { ideal: frameRate, max: frameRate },
+      frameRate: { ideal: frameRate },
     }));
   });
 });
