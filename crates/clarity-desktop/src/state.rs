@@ -20,6 +20,9 @@ pub struct ChatMessage {
 pub struct PresenceView {
     /// Friend code → their presence. Absent means never-seen (treat as offline).
     pub friends: HashMap<String, FriendPresence>,
+    /// Codes that added this identity and are waiting for it to add them back
+    /// — incoming friend requests, as the server last reported them.
+    pub requests: Vec<String>,
     /// This identity's own code, echoed by the server after the handshake.
     pub self_code: Option<String>,
     pub connected: bool,

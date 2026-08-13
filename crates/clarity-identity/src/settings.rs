@@ -51,6 +51,10 @@ pub struct Settings {
     /// can decode. An empty list means the engine's default order. Unknown
     /// ids are ignored, so a newer build's ranking loads harmlessly here.
     pub codec_ranking: Vec<String>,
+    /// Friend codes whose incoming requests were dismissed, so the server
+    /// re-reporting them (it pushes the full pending set on every connect)
+    /// does not re-nag. Dismissal is local only; the requester is not told.
+    pub dismissed_requests: Vec<String>,
 }
 
 impl Settings {
@@ -78,6 +82,7 @@ impl Default for Settings {
             include_system_audio: true,
             always_relay: false,
             codec_ranking: Vec::new(),
+            dismissed_requests: Vec::new(),
         }
     }
 }

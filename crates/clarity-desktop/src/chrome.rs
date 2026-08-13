@@ -356,7 +356,16 @@ fn friends_list(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     }
 
     ui.add_space(10.0);
-    if add_friend_button(ui, pal).clicked() {
+    // Incoming requests not yet acted on surface here, so an invite is
+    // noticeable without opening the Friends screen.
+    let invites = state
+        .presence_view
+        .requests
+        .iter()
+        .filter(|code| state.store.contacts.name_of(code).is_none())
+        .filter(|code| !state.store.settings.dismissed_requests.contains(code))
+        .count();
+    if add_friend_button(ui, pal, invites).clicked() {
         state.go(Screen::Friends);
     }
 }
@@ -465,14 +474,18 @@ fn start_room_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn add_friend_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+fn add_friend_button(ui: &mut egui::Ui, pal: &Palette, invites: usize) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-    let border = if resp.hovered() {
+    let border = if invites > 0 {
+        pal.accent.gamma_multiply(0.5)
+    } else if resp.hovered() {
         pal.border_strong
     } else {
         pal.border
     };
-    let fg = if resp.hovered() {
+    let fg = if invites > 0 {
+        pal.accent_text
+    } else if resp.hovered() {
         pal.text
     } else {
         pal.text_dim
@@ -485,8 +498,13 @@ fn add_friend_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
         Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
+    let label = match invites {
+        0 => "Add a friend".to_owned(),
+        1 => "Add a friend · 1 invite".to_owned(),
+        n => format!("Add a friend · {n} invites"),
+    };
     let galley = ui.painter().layout_no_wrap(
-        "Add a friend".into(),
+        label,
         egui::FontId::new(11.5, egui::FontFamily::Proportional),
         fg,
     );

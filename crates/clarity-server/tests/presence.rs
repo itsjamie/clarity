@@ -317,6 +317,16 @@ async fn authenticate_viewer(server: &TestServer, room: &CreateRoomResponse) -> 
     socket
 }
 
+/// Reads presence messages until a `presence:requests` set arrives, returning
+/// its codes.
+async fn wait_requests(socket: &mut ClientWebSocket) -> Vec<String> {
+    loop {
+        if let PresenceServerMessage::Requests { codes, .. } = recv(socket).await {
+            return codes;
+        }
+    }
+}
+
 /// Reads presence messages until one reports a friend matching `predicate`.
 async fn wait_presence(
     socket: &mut ClientWebSocket,
@@ -357,6 +367,62 @@ async fn mutual_friends_see_presence_and_last_seen() {
     drop(a);
     let gone = wait_presence(&mut b, |f| f.code == id_a.code() && !f.online).await;
     assert!(gone.last_seen_seconds_ago.is_some());
+}
+
+#[tokio::test]
+async fn a_one_sided_add_arrives_as_a_request_and_accepting_makes_it_mutual() {
+    let server = spawn_server().await;
+    let id_a = Identity::new();
+    let id_b = Identity::new();
+
+    // A adds B and goes away; the request outlives A's connection.
+    let mut a = connect_presence(&server).await;
+    handshake(&mut a, &id_a, &server).await;
+    subscribe(&mut a, vec![id_b.code()]).await;
+    assert_eq!(wait_requests(&mut a).await, Vec::<String>::new());
+    drop(a);
+
+    // B connects later and subscribes its (empty) contact set: the pending
+    // request is in its very first requests set.
+    let mut b = connect_presence(&server).await;
+    handshake(&mut b, &id_b, &server).await;
+    subscribe(&mut b, Vec::new()).await;
+    assert_eq!(wait_requests(&mut b).await, vec![id_a.code()]);
+
+    // B accepts by adding A back; its own pending set clears.
+    subscribe(&mut b, vec![id_a.code()]).await;
+    assert_eq!(wait_requests(&mut b).await, Vec::<String>::new());
+
+    // A returns: the pair is mutual, so each sees the other's presence, and
+    // neither side has a pending request. The snapshot precedes the requests
+    // set on the wire, so read it first.
+    let mut a = connect_presence(&server).await;
+    handshake(&mut a, &id_a, &server).await;
+    subscribe(&mut a, vec![id_b.code()]).await;
+    wait_presence(&mut a, |f| f.code == id_b.code() && f.online).await;
+    assert_eq!(wait_requests(&mut a).await, Vec::<String>::new());
+    wait_presence(&mut b, |f| f.code == id_a.code() && f.online).await;
+}
+
+#[tokio::test]
+async fn cancelling_an_invite_withdraws_the_request() {
+    let server = spawn_server().await;
+    let id_a = Identity::new();
+    let id_b = Identity::new();
+
+    let mut a = connect_presence(&server).await;
+    let mut b = connect_presence(&server).await;
+    handshake(&mut a, &id_a, &server).await;
+    handshake(&mut b, &id_b, &server).await;
+    subscribe(&mut b, Vec::new()).await;
+    assert_eq!(wait_requests(&mut b).await, Vec::<String>::new());
+
+    subscribe(&mut a, vec![id_b.code()]).await;
+    assert_eq!(wait_requests(&mut b).await, vec![id_a.code()]);
+
+    // A cancels: resubscribing without B withdraws the request live.
+    subscribe(&mut a, Vec::new()).await;
+    assert_eq!(wait_requests(&mut b).await, Vec::<String>::new());
 }
 
 #[tokio::test]

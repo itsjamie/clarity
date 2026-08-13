@@ -34,6 +34,11 @@ export interface PresenceState {
   /** The friend code the server derived from our public key. */
   selfCode: string | null;
   friends: readonly FriendPresence[];
+  /**
+   * Codes that added this identity and are waiting for it to add them back —
+   * incoming friend requests, as the server last reported them.
+   */
+  requests: readonly string[];
 }
 
 /**
@@ -62,7 +67,7 @@ export class PresenceClient implements ExternalStateStore<PresenceState> {
   #reconnectTimer: number | null = null;
   #contactCodes: readonly string[] = [];
   #hosting: HostingAnnouncement | null = null;
-  #state: PresenceState = { status: 'idle', selfCode: null, friends: [] };
+  #state: PresenceState = { status: 'idle', selfCode: null, friends: [], requests: [] };
 
   public constructor(options: PresenceClientOptions) {
     this.#options = options;
@@ -178,6 +183,9 @@ export class PresenceClient implements ExternalStateStore<PresenceState> {
       case 'presence:snapshot':
         this.#patch({ friends: sortFriends(message.friends) });
         break;
+      case 'presence:requests':
+        this.#patch({ requests: [...message.codes] });
+        break;
       case 'presence:update':
         this.#patch({
           friends: sortFriends([
@@ -232,6 +240,7 @@ const PRESENCE_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   'presence:ready',
   'presence:snapshot',
   'presence:update',
+  'presence:requests',
   'error',
 ]);
 

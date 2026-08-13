@@ -158,7 +158,7 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
         }
         match parsed {
             PresenceClientMessage::Subscribe { codes, .. } => {
-                state.presence.subscribe(session_id, codes);
+                state.presence.subscribe(session_id, sanitize_subscriptions(codes));
             }
             PresenceClientMessage::Announce {
                 hosting,
@@ -297,6 +297,24 @@ enum Reject {
     UnsupportedVersion,
     BadSignature,
     RateLimited,
+}
+
+/// The most contacts one identity's subscription may hold. The registry keeps
+/// each identity's standing set in memory across disconnects, so an
+/// unbounded list would let one authenticated identity grow server memory
+/// with junk strings; well-formed codes and a cap bound it to real-looking
+/// contacts. Far above any plausible friend list.
+const MAX_SUBSCRIPTIONS: usize = 512;
+
+/// Drops malformed codes and truncates the list to [`MAX_SUBSCRIPTIONS`].
+/// Only well-formed friend codes can name a real identity, so nothing a
+/// client could productively subscribe to is lost.
+fn sanitize_subscriptions(codes: Vec<String>) -> Vec<String> {
+    codes
+        .into_iter()
+        .filter(|code| clarity_protocol::code::is_valid(code))
+        .take(MAX_SUBSCRIPTIONS)
+        .collect()
 }
 
 fn presence_error(reason: Reject) -> PresenceServerMessage {

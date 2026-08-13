@@ -116,10 +116,21 @@ struct Session {
 /// online exactly while it has a session, which keeps multi-device correct
 /// without extra bookkeeping. `last_seen` remembers when an identity's final
 /// session dropped; it is in-memory only and lost on restart.
+///
+/// `standing` records standing interest: requester code → the codes it
+/// subscribes to. Unlike a session's subscriptions it survives disconnects,
+/// so a friend request (a one-sided entry) can still be shown when the target
+/// connects after the requester left. Each subscribe replaces the identity's
+/// whole entry with the union of its live sessions' sets, so a contact
+/// removed while offline is withdrawn on the next connect — a session-diff
+/// would let an entry from a dead session linger forever. Like `last_seen` it
+/// is lost on restart, but every client resubscribes its full contact set on
+/// connect, so it self-heals.
 #[derive(Default)]
 pub struct PresenceState {
     sessions: HashMap<SessionId, Session>,
     last_seen: HashMap<String, OffsetDateTime>,
+    standing: HashMap<String, HashSet<String>>,
 }
 
 impl PresenceState {
@@ -145,7 +156,10 @@ impl PresenceState {
 
     /// Replaces a session's watch set. Sends the subscriber a snapshot of the
     /// friends now visible to it, and tells each friend whose mutual status with
-    /// this identity changed.
+    /// this identity changed. Also maintains the standing `wants` interest and
+    /// keeps everyone's pending-request view current: the subscriber always gets
+    /// its own `presence:requests` set, and each target this identity just added
+    /// or withdrew from gets its recomputed set.
     pub fn subscribe(&mut self, id: SessionId, codes: Vec<String>, now: OffsetDateTime) {
         let Some(session) = self.sessions.get(&id) else {
             return;
@@ -158,11 +172,37 @@ impl PresenceState {
         session.subscriptions = codes.into_iter().collect();
         let now_visible = self.watchers_of(&code);
 
+        // Standing interest becomes the union of this identity's LIVE
+        // sessions' sets, not a diff against this session's previous set: a
+        // diff can never withdraw an entry a dead session registered, so a
+        // contact removed while offline would leave the target a phantom
+        // request until the server restarted. The union keeps multi-device
+        // correct (a device dropping a contact another live device still has
+        // withdraws nothing), with one accepted wrinkle: a device
+        // resubscribing while its sibling is offline narrows the identity's
+        // standing set to what the live devices hold, until the sibling
+        // reconnects and re-registers its own contacts.
+        let union: HashSet<String> = self
+            .sessions
+            .values()
+            .filter(|session| session.code == code)
+            .flat_map(|session| session.subscriptions.iter().cloned())
+            .collect();
+        let old_standing = self.standing.get(&code).cloned().unwrap_or_default();
+        let added: Vec<String> = union.difference(&old_standing).cloned().collect();
+        let removed: Vec<String> = old_standing.difference(&union).cloned().collect();
+        if union.is_empty() {
+            self.standing.remove(&code);
+        } else {
+            self.standing.insert(code.clone(), union);
+        }
+
         let friends: Vec<FriendPresence> = now_visible
             .iter()
             .map(|peer| self.presence_of(peer, now))
             .collect();
         self.send_to_code(&code, snapshot(friends, now));
+        self.send_to_code(&code, requests(self.requests_of(&code), now));
 
         // Peers whose view of this identity changed: newly-mutual peers learn it
         // is here; no-longer-mutual peers see it drop away.
@@ -173,6 +213,14 @@ impl PresenceState {
                 self.offline_presence(&code, now)
             };
             self.send_to_code(peer, update(presence, now));
+        }
+
+        // Targets this identity just added or withdrew from: their pending set
+        // may have gained or lost this code, so push the recomputed set.
+        for target in added.iter().chain(&removed) {
+            if target != &code {
+                self.send_to_code(target, requests(self.requests_of(target), now));
+            }
         }
     }
 
@@ -318,6 +366,28 @@ impl PresenceState {
         }
     }
 
+    /// The codes wanting `code` without reciprocation — its pending friend
+    /// requests. Judged on `standing` (not live sessions), so a request
+    /// stands while the requester is offline and clears the moment `code`
+    /// subscribes back, online or not. The scan over all standing entries is
+    /// proportional to the identities with contacts, which the subscription
+    /// cap keeps bounded. Sorted, so pushes are deterministic.
+    fn requests_of(&self, code: &str) -> Vec<String> {
+        let reciprocated = self.standing.get(code);
+        let mut codes: Vec<String> = self
+            .standing
+            .iter()
+            .filter(|(requester, targets)| {
+                requester.as_str() != code
+                    && targets.contains(code)
+                    && !reciprocated.is_some_and(|wanted| wanted.contains(requester.as_str()))
+            })
+            .map(|(requester, _)| requester.clone())
+            .collect();
+        codes.sort();
+        codes
+    }
+
     /// Seconds since the identity's last session dropped; `None` while online
     /// or when it has not been seen since the server started.
     fn last_seen_seconds_ago(&self, code: &str, now: OffsetDateTime) -> Option<u64> {
@@ -356,6 +426,14 @@ fn update(friend: FriendPresence, now: OffsetDateTime) -> PresenceServerMessage 
         protocol_version: PROTOCOL_VERSION,
         server_timestamp: format_time(now),
         friend,
+    }
+}
+
+fn requests(codes: Vec<String>, now: OffsetDateTime) -> PresenceServerMessage {
+    PresenceServerMessage::Requests {
+        protocol_version: PROTOCOL_VERSION,
+        server_timestamp: format_time(now),
+        codes,
     }
 }
 
@@ -508,6 +586,18 @@ mod tests {
         map
     }
 
+    /// Drains a receiver into the last pending-request set it was told, `None`
+    /// when no requests message arrived. Other message kinds are discarded.
+    fn last_requests(rx: &mut mpsc::Receiver<PresenceServerMessage>) -> Option<Vec<String>> {
+        let mut last = None;
+        while let Ok(message) = rx.try_recv() {
+            if let PresenceServerMessage::Requests { codes, .. } = message {
+                last = Some(codes);
+            }
+        }
+        last
+    }
+
     const A: &str = "clr-AAAA-AAAA";
     const B: &str = "clr-BBBB-BBBB";
 
@@ -533,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn one_sided_subscription_reveals_nothing() {
+    fn one_sided_subscription_reveals_a_request_but_no_presence() {
         let mut state = PresenceState::new();
         let (a_tx, mut a_rx) = session();
         let (b_tx, mut b_rx) = session();
@@ -543,7 +633,113 @@ mod tests {
         // A watches B, but B never adds A.
         state.subscribe(1, vec![B.to_owned()], at());
         assert!(view(&mut a_rx).is_empty(), "A must not see an unrequited add");
-        assert!(view(&mut b_rx).is_empty(), "B is not told it is being watched");
+        // B is told who is waiting — that is the friend request — but learns
+        // nothing about A's presence until the pair is mutual.
+        let mut b_presence = 0;
+        let mut b_requests = None;
+        while let Ok(message) = b_rx.try_recv() {
+            match message {
+                PresenceServerMessage::Snapshot { friends, .. } => b_presence += friends.len(),
+                PresenceServerMessage::Update { .. } => b_presence += 1,
+                PresenceServerMessage::Requests { codes, .. } => b_requests = Some(codes),
+                _ => {}
+            }
+        }
+        assert_eq!(b_presence, 0, "B sees no presence from an unrequited add");
+        assert_eq!(b_requests, Some(vec![A.to_owned()]));
+    }
+
+    #[test]
+    fn a_request_waits_for_a_target_that_subscribes_later() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        // A leaves; the standing interest survives the disconnect.
+        state.disconnect(1, at());
+
+        let (b_tx, mut b_rx) = session();
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(2, Vec::new(), at());
+        assert_eq!(last_requests(&mut b_rx), Some(vec![A.to_owned()]));
+    }
+
+    #[test]
+    fn adding_back_clears_the_request_on_both_sides() {
+        let mut state = PresenceState::new();
+        let (a_tx, mut a_rx) = session();
+        let (b_tx, mut b_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.connect(2, B.to_owned(), b_tx);
+
+        state.subscribe(1, vec![B.to_owned()], at());
+        assert_eq!(last_requests(&mut b_rx), Some(vec![A.to_owned()]));
+
+        // B accepts by adding A: the pair is mutual, so neither side has a
+        // pending request any more.
+        state.subscribe(2, vec![A.to_owned()], at());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+        assert_eq!(last_requests(&mut a_rx), Some(Vec::new()));
+    }
+
+    #[test]
+    fn withdrawing_the_subscription_withdraws_the_request() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        let (b_tx, mut b_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.connect(2, B.to_owned(), b_tx);
+
+        state.subscribe(1, vec![B.to_owned()], at());
+        assert_eq!(last_requests(&mut b_rx), Some(vec![A.to_owned()]));
+
+        // A cancels the invite by resubscribing without B.
+        state.subscribe(1, Vec::new(), at());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+    }
+
+    /// The phantom-invite regression: interest registered by a session that
+    /// then disconnects must be withdrawable by a later session of the same
+    /// identity. A session-diff can never see the dead session's entries, so
+    /// the reconciliation replaces the identity's standing set wholesale.
+    #[test]
+    fn a_contact_removed_while_offline_withdraws_the_request() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        state.disconnect(1, at());
+
+        // A removed B from its contacts while offline, then reconnects and
+        // resubscribes without B.
+        let (a_tx, _a_rx) = session();
+        state.connect(3, A.to_owned(), a_tx);
+        state.subscribe(3, Vec::new(), at());
+
+        let (b_tx, mut b_rx) = session();
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(2, Vec::new(), at());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
+    }
+
+    /// The live variant: B is already connected when A's reconnect withdraws
+    /// the dead session's interest, so B must be pushed the emptied set.
+    #[test]
+    fn a_reconnect_without_the_contact_clears_the_request_live() {
+        let mut state = PresenceState::new();
+        let (a_tx, _a_rx) = session();
+        let (b_tx, mut b_rx) = session();
+        state.connect(1, A.to_owned(), a_tx);
+        state.connect(2, B.to_owned(), b_tx);
+        state.subscribe(1, vec![B.to_owned()], at());
+        state.subscribe(2, Vec::new(), at());
+        assert_eq!(last_requests(&mut b_rx), Some(vec![A.to_owned()]));
+
+        state.disconnect(1, at());
+        let (a_tx, _a_rx) = session();
+        state.connect(3, A.to_owned(), a_tx);
+        state.subscribe(3, Vec::new(), at());
+        assert_eq!(last_requests(&mut b_rx), Some(Vec::new()));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 import { presenceUrl } from '@/config/environment';
 import { ContactsStore } from '@/lib/identity/contacts-store';
+import { DismissedRequestsStore } from '@/lib/identity/dismissed-requests';
 import { IdentityStore } from '@/lib/identity/identity-store';
 import type { ExternalStateStore } from '@/hooks/use-session-state';
 import {
@@ -16,8 +17,14 @@ import {
 
 export const identityStore = new IdentityStore();
 export const contactsStore = new ContactsStore();
+export const dismissedRequestsStore = new DismissedRequestsStore();
 
-const IDLE_PRESENCE: PresenceState = { status: 'idle', selfCode: null, friends: [] };
+const IDLE_PRESENCE: PresenceState = {
+  status: 'idle',
+  selfCode: null,
+  friends: [],
+  requests: [],
+};
 
 let client: PresenceClient | null = null;
 let clientKey: string | null = null;

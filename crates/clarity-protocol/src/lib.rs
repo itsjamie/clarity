@@ -699,6 +699,16 @@ pub enum PresenceServerMessage {
         server_timestamp: String,
         friend: FriendPresence,
     },
+    #[serde(rename = "presence:requests")]
+    Requests {
+        protocol_version: u16,
+        server_timestamp: String,
+        /// The full set of friend codes subscribed to this identity without
+        /// reciprocation — people who added this identity and are waiting for
+        /// it to add them back. Replaces any previous set. Presence itself
+        /// stays hidden until the pair is mutual; only the codes are shown.
+        codes: Vec<String>,
+    },
     #[serde(rename = "error")]
     Error {
         protocol_version: u16,
@@ -760,6 +770,18 @@ mod tests {
         .expect("serializes");
         assert_eq!(value["type"], "auth:identity-challenge");
         assert_eq!(value["nonce"], "nonce");
+    }
+
+    #[test]
+    fn presence_requests_are_explicit_protocol_messages() {
+        let value = serde_json::to_value(PresenceServerMessage::Requests {
+            protocol_version: PROTOCOL_VERSION,
+            server_timestamp: "now".into(),
+            codes: vec!["clr-AAAA-AAAA".into()],
+        })
+        .expect("serializes");
+        assert_eq!(value["type"], "presence:requests");
+        assert_eq!(value["codes"][0], "clr-AAAA-AAAA");
     }
 
     #[test]

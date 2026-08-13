@@ -4,15 +4,31 @@ import { useNow } from '@/hooks/use-now';
 import { useSessionState } from '@/hooks/use-session-state';
 import {
   contactsStore,
+  dismissedRequestsStore,
   identityStore,
+  presenceStore,
 } from '@/lib/presence/presence-service';
+import { openRequests } from '@/lib/identity/dismissed-requests';
 import { initials } from '@/features/shell/lib/friend-rows';
 
 export function FriendsRoute() {
   const identity = useSessionState(identityStore);
   const contacts = useSessionState(contactsStore);
+  const presence = useSessionState(presenceStore);
+  const dismissed = useSessionState(dismissedRequestsStore);
   const now = useNow(30_000);
   const waiting = contacts.contacts.filter((contact) => !contact.confirmed);
+  const invites = openRequests(presence.requests, contacts.contacts, dismissed.codes);
+
+  const accept = (code: string) => {
+    try {
+      contactsStore.add(code, '', identity.friendCode);
+    } catch {
+      // Already a contact or a malformed code: nothing sensible to add, so
+      // dismiss it rather than leaving a row whose Accept can never work.
+      dismissedRequestsStore.dismiss(code);
+    }
+  };
 
   return (
     <div className="shell-page">
@@ -40,6 +56,39 @@ export function FriendsRoute() {
 
         <AddFriendPanel ownCode={identity.friendCode} />
       </div>
+
+      {invites.length > 0 ? (
+        <div className="friends-waiting">
+          <div className="shell-panel__eyebrow">Invites for you</div>
+          <div className="friends-waiting__list">
+            {invites.map((code) => (
+              <div key={code} className="friends-waiting__row">
+                <span className="friend-row__avatar" aria-hidden="true">
+                  {initials(code)}
+                </span>
+                <span className="friends-waiting__copy">
+                  <strong>{code}</strong>
+                  <span>added you and is waiting</span>
+                </span>
+                <button
+                  type="button"
+                  className="shell-button shell-button--accent"
+                  onClick={() => accept(code)}
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  className="shell-button shell-button--danger-ghost"
+                  onClick={() => dismissedRequestsStore.dismiss(code)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {waiting.length > 0 ? (
         <div className="friends-waiting">

@@ -4,9 +4,11 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useSessionState } from '@/hooks/use-session-state';
 import {
   contactsStore,
+  dismissedRequestsStore,
   identityStore,
   presenceStore,
 } from '@/lib/presence/presence-service';
+import { openRequests } from '@/lib/identity/dismissed-requests';
 import {
   formatLastSeen,
   friendRows,
@@ -25,8 +27,10 @@ export function ShellSidebar({
   const identity = useSessionState(identityStore);
   const contacts = useSessionState(contactsStore);
   const presence = useSessionState(presenceStore);
+  const dismissed = useSessionState(dismissedRequestsStore);
   const rows = friendRows(contacts.contacts, presence.friends);
   const live = liveRooms(rows);
+  const invites = openRequests(presence.requests, contacts.contacts, dismissed.codes);
 
   return (
     <aside className="shell-sidebar">
@@ -63,13 +67,18 @@ export function ShellSidebar({
               {row.online ? (
                 <i className="friend-row__dot" aria-label="Online" />
               ) : (
-                <span className="friend-row__seen">{formatLastSeen(row)}</span>
+                <span className="friend-row__seen">
+                  {/* Never-mutual contacts are still an invite, not "away". */}
+                  {row.confirmed ? formatLastSeen(row) : 'invited'}
+                </span>
               )}
             </div>
           ))}
         </div>
         <NavLink to="/friends" className="shell-sidebar__add-friend">
-          Add a friend
+          {invites.length === 0
+            ? 'Add a friend'
+            : `Add a friend · ${invites.length} ${invites.length === 1 ? 'invite' : 'invites'}`}
         </NavLink>
       </div>
 

@@ -46,6 +46,10 @@ pub enum PresenceEvent {
     Snapshot(Vec<FriendPresence>),
     /// One friend's presence changed.
     Update(FriendPresence),
+    /// The full set of codes that added this identity and are waiting for it
+    /// to add them back — its incoming friend requests. Replaces any previous
+    /// set.
+    Requests(Vec<String>),
 }
 
 pub struct PresenceConfig {
@@ -251,6 +255,9 @@ async fn session(
                     }
                     Ok(PresenceServerMessage::Update { friend, .. }) => {
                         let _ = events.send(PresenceEvent::Update(friend));
+                    }
+                    Ok(PresenceServerMessage::Requests { codes, .. }) => {
+                        let _ = events.send(PresenceEvent::Requests(codes));
                     }
                     Ok(_) => {}
                     Err(_) => return Outcome::ConnectionLost,

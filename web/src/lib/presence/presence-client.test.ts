@@ -48,6 +48,12 @@ describe('presence client', () => {
 
     socket.receive(update(friend('clr-JOYG-7DSO', false, 120)));
     expect(client.getSnapshot().friends).toEqual([friend('clr-JOYG-7DSO', false, 120)]);
+
+    // Incoming friend requests arrive as a replace-set message.
+    socket.receive(requests(['clr-RQGM-C6QE']));
+    expect(client.getSnapshot().requests).toEqual(['clr-RQGM-C6QE']);
+    socket.receive(requests([]));
+    expect(client.getSnapshot().requests).toEqual([]);
   });
 
   it('reconnects with backoff and replays subscription and announcement', async () => {
@@ -150,6 +156,15 @@ function update(friend: FriendPresence): PresenceServerMessage {
     protocolVersion: PROTOCOL_VERSION,
     serverTimestamp: 'now',
     friend,
+  };
+}
+
+function requests(codes: string[]): PresenceServerMessage {
+  return {
+    type: 'presence:requests',
+    protocolVersion: PROTOCOL_VERSION,
+    serverTimestamp: 'now',
+    codes,
   };
 }
 

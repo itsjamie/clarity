@@ -853,6 +853,7 @@ pub fn friends(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
         });
 
         ui.add_space(34.0);
+        incoming_invites(ui, pal, state);
         let pending: Vec<clarity_identity::Contact> =
             state.store.contacts.pending().cloned().collect();
         constrained(ui, 900.0, |ui| {
@@ -997,6 +998,95 @@ fn code_plate(ui: &mut egui::Ui, pal: &Palette, code: &str) {
         egui::FontId::new(20.0, crate::theme::mono()),
         pal.text_bright,
     );
+}
+
+/// The "Invites for you" section: codes the server reports as waiting on this
+/// identity, minus contacts already added and requests dismissed earlier.
+/// Renders nothing when there are none. Accepting is just adding the requester
+/// as a contact — the per-frame subscription sync makes the pair mutual, which
+/// lights up presence (and confirms the contact) on both sides.
+fn incoming_invites(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
+    let incoming: Vec<String> = state
+        .presence_view
+        .requests
+        .iter()
+        .filter(|code| state.store.contacts.name_of(code).is_none())
+        .filter(|code| !state.store.settings.dismissed_requests.contains(code))
+        .cloned()
+        .collect();
+    if incoming.is_empty() {
+        return;
+    }
+    constrained(ui, 900.0, |ui| {
+        section_label(ui, pal, "Invites for you", Some(&incoming.len().to_string()));
+        ui.add_space(10.0);
+        ui.spacing_mut().item_spacing.y = 8.0;
+        let mut accepted = None;
+        let mut dismissed = None;
+        for code in &incoming {
+            match incoming_invite(ui, pal, code) {
+                Some(true) => accepted = Some(code.clone()),
+                Some(false) => dismissed = Some(code.clone()),
+                None => {}
+            }
+        }
+        if let Some(code) = accepted {
+            accept_request(state, &code);
+        }
+        if let Some(code) = dismissed {
+            state.store.settings.dismissed_requests.push(code);
+            let _ = state.store.persist_settings();
+        }
+    });
+    ui.add_space(34.0);
+}
+
+/// Renders one incoming request; `Some(true)` when Accept was clicked,
+/// `Some(false)` for Dismiss.
+fn incoming_invite(ui: &mut egui::Ui, pal: &Palette, code: &str) -> Option<bool> {
+    card(ui, pal.card_alt, pal.border, Margin::symmetric(16, 13), |ui| {
+        ui.horizontal(|ui| {
+            avatar(ui, 30.0, &crate::ui::initials(code), pal.raised, pal.text);
+            ui.add_space(14.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
+                ui.label(strong(code, 13.0, pal.text_bright));
+                ui.label(mono_text("added you and is waiting", 10.5, pal.text_dim));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let dismiss = crate::ui::outline_button(ui, pal, "Dismiss", 30.0).clicked();
+                ui.add_space(6.0);
+                let accept = accent_button(ui, pal, "Accept", 30.0).clicked();
+                if accept {
+                    Some(true)
+                } else if dismiss {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .inner
+        })
+        .inner
+    })
+}
+
+/// Adds the requester back as a contact, which accepts the invite. The name
+/// defaults to the code, the same fallback the add form uses; it can be edited
+/// later like any contact.
+fn accept_request(state: &mut AppState, code: &str) {
+    let own = state
+        .store
+        .identity
+        .as_ref()
+        .map(|identity| identity.friend_code())
+        .unwrap_or_default();
+    match state.store.contacts.add(code, code, &own) {
+        Ok(()) => {
+            let _ = state.store.persist_contacts();
+        }
+        Err(error) => state.friend_error = Some(error.to_string()),
+    }
 }
 
 /// Renders one pending invite; returns true if its Cancel was clicked.

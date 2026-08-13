@@ -91,6 +91,7 @@ impl PresenceLink {
                 PresenceEvent::Update(friend) => {
                     view.friends.insert(friend.code.clone(), friend);
                 }
+                PresenceEvent::Requests(codes) => view.requests = codes,
             }
         }
     }

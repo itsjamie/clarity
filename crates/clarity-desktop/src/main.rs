@@ -144,6 +144,30 @@ impl ClarityApp {
             link.pump(&mut self.state.presence_view);
             link.sync(presence::contact_codes(&self.state.store));
         }
+        self.confirm_seen_contacts();
+    }
+
+    /// Marks pending contacts confirmed once presence reveals them. The server
+    /// only reveals a friend when the pair is mutual, so a sighting is the
+    /// confirmation the contact file is waiting for (the web client does the
+    /// same in `confirmSeenContacts`).
+    fn confirm_seen_contacts(&mut self) {
+        let mut confirmed_any = false;
+        for code in self.state.presence_view.friends.keys() {
+            let pending = self
+                .state
+                .store
+                .contacts
+                .iter()
+                .any(|contact| contact.code == *code && contact.pending);
+            if pending {
+                self.state.store.contacts.confirm(code);
+                confirmed_any = true;
+            }
+        }
+        if confirmed_any {
+            let _ = self.state.store.persist_contacts();
+        }
     }
 
     /// Handles room and sharing requests, forwards chat, and pumps the

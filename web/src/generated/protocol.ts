@@ -119,4 +119,11 @@ code: string, } | { "type": "presence:snapshot", protocolVersion: number, server
 /**
  * Every currently-visible friend (mutually added and online).
  */
-friends: Array<FriendPresence>, } | { "type": "presence:update", protocolVersion: number, serverTimestamp: string, friend: FriendPresence, } | { "type": "error", protocolVersion: number, serverTimestamp: string, code: ErrorCode, message: string, };
+friends: Array<FriendPresence>, } | { "type": "presence:update", protocolVersion: number, serverTimestamp: string, friend: FriendPresence, } | { "type": "presence:requests", protocolVersion: number, serverTimestamp: string, 
+/**
+ * The full set of friend codes subscribed to this identity without
+ * reciprocation — people who added this identity and are waiting for
+ * it to add them back. Replaces any previous set. Presence itself
+ * stays hidden until the pair is mutual; only the codes are shown.
+ */
+codes: Array<string>, } | { "type": "error", protocolVersion: number, serverTimestamp: string, code: ErrorCode, message: string, };
