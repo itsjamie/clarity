@@ -1,4 +1,4 @@
-import type { IceConfiguration } from '@/generated/protocol';
+import type { ClientMessage, IceConfiguration } from '@/generated/protocol';
 import { DiagnosticsCollector } from '@/lib/diagnostics/diagnostics-collector';
 
 import { PresenterConnectionManager } from './presenter-connection-manager';
@@ -96,6 +96,28 @@ describe('presenter connection manager reconfiguration', () => {
 
     await manager.setSource(streamWith(videoTrack('first')));
     expect(FakePeerConnection.instances).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('re-offers an idle-born peer when the first source arrives, then replaces silently', async () => {
+    const sendSignal = vi.fn<(message: ClientMessage) => void>();
+    const manager = new PresenterConnectionManager({
+      sendSignal,
+      onStatus: vi.fn(),
+      onChat: vi.fn(),
+      diagnostics: new DiagnosticsCollector(),
+    });
+    const offerCount = () =>
+      sendSignal.mock.calls.filter(([message]) => message.type === 'signal:offer').length;
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.addApprovedViewer('viewer-1');
+    const offersBefore = offerCount();
+
+    await expect(manager.setSource(streamWith(videoTrack('first')))).resolves.toEqual([]);
+    expect(offerCount()).toBe(offersBefore + 1);
+
+    await expect(manager.replaceSource(streamWith(videoTrack('second')))).resolves.toEqual([]);
+    expect(offerCount()).toBe(offersBefore + 1);
     manager.stopAll();
   });
 

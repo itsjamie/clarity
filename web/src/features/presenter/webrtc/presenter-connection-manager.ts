@@ -51,6 +51,7 @@ interface PeerEntry {
   videoSender: RTCRtpSender;
   audioSender: RTCRtpSender | null;
   chat: RTCDataChannel | null;
+  negotiatedWithTrack: boolean;
   mode: CaptureMode;
   queuedCandidates: RTCIceCandidateInit[];
   stats: WebRtcStatsCollector;
@@ -184,12 +185,20 @@ export class PresenterConnectionManager {
     const failures: string[] = [];
     for (const entry of this.#entries.values()) {
       try {
+        let needsOffer = !entry.negotiatedWithTrack;
         await entry.videoSender.replaceTrack(videoTrack);
         if (entry.audioSender) {
           await entry.audioSender.replaceTrack(audioTrack);
         } else if (audioTrack) {
           entry.audioSender = entry.connection.addTrack(audioTrack, stream);
+          needsOffer = true;
+        }
+        if (needsOffer) {
+          // A peer born in an idle room negotiated its media section without
+          // a track; re-offer so the session is negotiated against the real
+          // source and its stream ids, like a peer created mid-share.
           await this.#negotiate(entry, false);
+          entry.negotiatedWithTrack = true;
         }
         if (entry.mode === this.#mode) {
           entry.adaptation.reset();
@@ -272,6 +281,7 @@ export class PresenterConnectionManager {
       videoSender: transceiver.sender,
       audioSender,
       chat,
+      negotiatedWithTrack: videoTrack !== null,
       mode: this.#mode,
       queuedCandidates: [],
       stats: new WebRtcStatsCollector(connection, 'outbound', (metrics) =>
