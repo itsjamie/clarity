@@ -1241,6 +1241,13 @@ impl Broadcast {
                 .field("media", "audio")
                 .field("encoding-name", "OPUS")
                 .field("clock-rate", 48_000)
+                // The offer is created as soon as the connection is assembled,
+                // usually before the first buffer reaches this branch, so the
+                // m-line is built from these query-time caps. Without the
+                // channel count the rtpmap comes out as `OPUS/48000`, and
+                // browsers, which implement RFC 7587's `opus/48000/2`
+                // verbatim, reject the whole audio section.
+                .field("encoding-params", "2")
                 .field("payload", 111);
             if gst::ElementFactory::find("rtphdrexttwcc").is_some() {
                 audio_rtp_caps = audio_rtp_caps
