@@ -33,7 +33,7 @@
 .shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: 212px minmax(0, 1fr);
 }
 
 @keyframes shell-pulse {

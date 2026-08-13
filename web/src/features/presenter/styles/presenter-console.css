@@ -1,6 +1,6 @@
 .presenter-console-shell {
   min-height: 100vh;
-  background: oklch(0.125 0.01 285);
+  background: oklch(0.085 0.004 260);
 }
 
 .presenter-console {
@@ -19,14 +19,14 @@
 .presenter-stage,
 .presenter-sidebar {
   overflow: hidden;
-  border: 1px solid oklch(0.29 0.015 285);
+  border: 1px solid oklch(1 0 0 / 0.08);
   border-radius: 16px;
-  background: oklch(0.165 0.012 285);
-  box-shadow: 0 18px 50px oklch(0.07 0.01 285 / 0.18);
+  background: oklch(0.125 0.005 260);
+  box-shadow: 0 18px 50px oklch(0 0 0 / 0.35);
 }
 
 .presenter-console .button--primary {
-  color: oklch(0.97 0.006 285);
+  color: oklch(0.96 0.004 260);
 }
 
 .presenter-stage__header {
@@ -68,7 +68,7 @@
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--text-muted);
-  box-shadow: 0 0 0 4px oklch(0.5 0.02 285 / 0.12);
+  box-shadow: 0 0 0 4px oklch(1 0 0 / 0.1);
 }
 
 .presenter-stage__status-dot--live {
@@ -133,24 +133,24 @@
   display: grid;
   place-items: center;
   overflow: hidden;
-  border-top: 1px solid oklch(0.235 0.012 285);
-  border-bottom: 1px solid oklch(0.235 0.012 285);
-  background-color: oklch(0.105 0.008 285);
+  border-top: 1px solid oklch(1 0 0 / 0.07);
+  border-bottom: 1px solid oklch(1 0 0 / 0.07);
+  background-color: oklch(0.135 0.006 260);
   background-image: repeating-linear-gradient(
     135deg,
-    oklch(0.14 0.01 285) 0,
-    oklch(0.14 0.01 285) 15px,
-    oklch(0.105 0.008 285) 15px,
-    oklch(0.105 0.008 285) 30px
+    oklch(0.155 0.008 260) 0,
+    oklch(0.155 0.008 260) 14px,
+    oklch(0.135 0.006 260) 14px,
+    oklch(0.135 0.006 260) 28px
   );
 }
 
 .presenter-stage__preview--live {
-  background: oklch(0.095 0.008 285);
+  background: oklch(0.085 0.004 260);
 }
 
 .presenter-stage__preview--paused {
-  background: oklch(0.115 0.01 285);
+  background: oklch(0.125 0.005 260);
 }
 
 .presenter-stage__video {
@@ -158,22 +158,22 @@
   height: 100%;
   display: block;
   object-fit: contain;
-  background: oklch(0.095 0.008 285);
+  background: oklch(0.085 0.004 260);
 }
 
 .presenter-stage__placeholder {
   display: grid;
   justify-items: center;
   gap: 4px;
-  color: oklch(0.63 0.01 285);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  color: oklch(0.6 0.012 260);
+  font-family: var(--font-mono);
   font-size: 0.7rem;
   line-height: 1.35;
   text-align: center;
 }
 
 .presenter-stage__placeholder strong {
-  color: oklch(0.72 0.01 285);
+  color: oklch(0.72 0.012 260);
   font-size: inherit;
   font-weight: 500;
 }
@@ -187,10 +187,10 @@
   align-items: center;
   gap: 7px;
   padding: 0 9px;
-  border: 1px solid oklch(0.3 0.018 285);
+  border: 1px solid oklch(1 0 0 / 0.1);
   border-radius: 999px;
   color: var(--text-strong);
-  background: oklch(0.115 0.01 285 / 0.94);
+  background: oklch(0.15 0.01 260 / 0.96);
   font-size: 0.66rem;
   font-weight: 750;
   letter-spacing: 0.03em;
@@ -225,9 +225,9 @@
   grid-template-columns: 1fr 1fr;
   gap: 2px;
   padding: 3px;
-  border: 1px solid oklch(0.31 0.016 285);
+  border: 1px solid oklch(1 0 0 / 0.1);
   border-radius: 7px;
-  background: oklch(0.12 0.009 285);
+  background: oklch(0.155 0.006 260);
 }
 
 .presenter-stage__mode button {
@@ -244,12 +244,13 @@
 
 .presenter-stage__mode button:hover:not(:disabled) {
   color: var(--text);
-  background: var(--surface-2);
+  background: oklch(1 0 0 / 0.06);
 }
 
 .presenter-stage__mode button.is-active {
-  color: oklch(0.97 0.006 285);
-  background: var(--accent);
+  box-shadow: inset 0 0 0 1px oklch(0.64 0.19 288 / 0.5);
+  color: oklch(0.96 0.004 260);
+  background: var(--accent-soft);
 }
 
 .presenter-stage__audio {
@@ -280,10 +281,10 @@
   width: 100%;
   height: 36px;
   padding: 0 30px 0 11px;
-  border: 1px solid oklch(0.31 0.016 285);
+  border: 1px solid oklch(1 0 0 / 0.1);
   border-radius: 7px;
   color: var(--text);
-  background: oklch(0.13 0.01 285);
+  background: oklch(0.155 0.006 260);
   font-size: 0.71rem;
 }
 
@@ -307,8 +308,8 @@
   align-items: center;
   gap: 8px;
   padding: 0 20px;
-  color: oklch(0.62 0.012 285);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  color: oklch(0.6 0.012 260);
+  font-family: var(--font-mono);
   font-size: 0.64rem;
 }
 
@@ -328,7 +329,7 @@
 
 .presenter-sidebar__section {
   padding: 18px 20px;
-  border-bottom: 1px solid oklch(0.26 0.014 285);
+  border-bottom: 1px solid oklch(1 0 0 / 0.07);
 }
 
 .presenter-sidebar__section:last-child {
@@ -357,7 +358,7 @@
 
 .presenter-sidebar__heading span,
 .presenter-sidebar__heading > span {
-  color: oklch(0.63 0.012 285);
+  color: oklch(0.6 0.012 260);
   font-size: 0.67rem;
   white-space: nowrap;
 }
@@ -376,10 +377,10 @@
   align-items: center;
   overflow: hidden;
   padding: 0 10px;
-  border: 1px solid oklch(0.29 0.015 285);
+  border: 1px solid oklch(1 0 0 / 0.08);
   border-radius: 6px;
-  color: oklch(0.64 0.012 285);
-  background: oklch(0.13 0.01 285);
+  color: oklch(0.66 0.012 260);
+  background: oklch(0.155 0.006 260);
   font-size: 0.66rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -397,7 +398,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: oklch(0.63 0.012 285);
+  color: oklch(0.6 0.012 260);
   font-size: 0.65rem;
 }
 
@@ -415,10 +416,10 @@
   width: 52px;
   height: 30px;
   padding: 0 7px;
-  border: 1px solid oklch(0.31 0.016 285);
+  border: 1px solid oklch(1 0 0 / 0.1);
   border-radius: 6px;
   color: var(--text-strong);
-  background: oklch(0.13 0.01 285);
+  background: oklch(0.155 0.006 260);
   font-size: 0.69rem;
 }
 
@@ -435,7 +436,7 @@
 .presenter-sidebar__live-window {
   padding: 3px 7px;
   border-radius: 999px;
-  background: oklch(0.235 0.014 285);
+  background: oklch(0.24 0.012 260);
   font-size: 0.59rem !important;
   font-weight: 650;
 }
@@ -448,7 +449,7 @@
 }
 
 .presenter-sidebar__bitrate strong {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 1.32rem;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.045em;
@@ -467,7 +468,7 @@
   height: 84px;
   overflow: hidden;
   border: 0;
-  border-bottom: 1px solid oklch(0.275 0.014 285);
+  border-bottom: 1px solid oklch(1 0 0 / 0.1);
   border-radius: 0;
   background: transparent;
 }
@@ -479,7 +480,7 @@
 }
 
 .presenter-sidebar .bitrate-chart__grid line {
-  stroke: oklch(0.32 0.015 285 / 0.44);
+  stroke: oklch(1 0 0 / 0.08);
 }
 
 .presenter-sidebar .bitrate-chart__grid line:nth-child(n + 4) {
@@ -487,11 +488,11 @@
 }
 
 .presenter-sidebar .bitrate-chart__area {
-  fill: oklch(0.68 0.19 289 / 0.18);
+  fill: oklch(0.64 0.19 288 / 0.22);
 }
 
 .presenter-sidebar .bitrate-chart__line {
-  stroke: oklch(0.73 0.18 289);
+  stroke: oklch(0.7 0.17 288);
   stroke-width: 2;
 }
 
@@ -505,7 +506,7 @@
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: oklch(0.63 0.012 285);
+  color: oklch(0.6 0.012 260);
   font-size: 0.64rem;
 }
 
@@ -522,7 +523,7 @@
   align-items: center;
   gap: 10px;
   padding: 9px 20px;
-  border-top: 1px solid oklch(0.25 0.013 285);
+  border-top: 1px solid oklch(1 0 0 / 0.07);
 }
 
 .presenter-sidebar__request-actions {
@@ -541,7 +542,7 @@
   min-width: 0;
   padding: 0;
   border: 0;
-  border-top: 1px solid oklch(0.25 0.013 285);
+  border-top: 1px solid oklch(1 0 0 / 0.07);
   border-radius: 0;
   background: transparent;
 }
@@ -564,8 +565,8 @@
   width: 28px;
   height: 28px;
   border: 0;
-  color: oklch(0.88 0.08 289);
-  background: oklch(0.31 0.08 289);
+  color: oklch(0.9 0.06 288);
+  background: oklch(0.3 0.09 288);
   font-size: 0.62rem;
 }
 
@@ -618,13 +619,13 @@
 }
 
 .presenter-console__viewer-details {
-  border-top: 1px solid oklch(0.24 0.012 285);
-  background: oklch(0.145 0.01 285);
+  border-top: 1px solid oklch(1 0 0 / 0.07);
+  background: oklch(0.125 0.005 260);
 }
 
 .presenter-console__viewer-details summary {
   padding: 9px 20px;
-  color: oklch(0.59 0.012 285);
+  color: oklch(0.56 0.012 260);
   cursor: pointer;
   font-size: 0.62rem;
 }
@@ -667,8 +668,8 @@
 
 .presenter-console__diagnostics {
   margin-top: 18px;
-  border-top: 1px solid oklch(0.25 0.013 285);
-  border-bottom: 1px solid oklch(0.25 0.013 285);
+  border-top: 1px solid oklch(1 0 0 / 0.07);
+  border-bottom: 1px solid oklch(1 0 0 / 0.07);
 }
 
 .presenter-console__diagnostics summary {
@@ -707,7 +708,7 @@
 
 .presenter-console__diagnostics-content dd {
   color: var(--text);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.65rem;
 }
 
