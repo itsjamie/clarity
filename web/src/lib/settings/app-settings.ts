@@ -20,6 +20,10 @@ export interface AppSettings {
   captureResolution: CaptureResolution;
   /** Whether new presenter sessions ask for system audio with the capture. */
   captureAudio: boolean;
+  /** Whether the viewer last chose to mute shared audio. */
+  viewerMuted: boolean;
+  /** Viewer audio volume the user last chose, 0-100. */
+  viewerVolume: number;
 }
 
 export const APP_SETTINGS_STORAGE_KEY = 'clarity:settings';
@@ -29,6 +33,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   captureMode: 'text',
   captureResolution: DEFAULT_CAPTURE_RESOLUTION,
   captureAudio: true,
+  viewerMuted: false,
+  viewerVolume: 70,
 };
 
 type SettingsStorage = Pick<Storage, 'getItem' | 'setItem'>;
@@ -47,6 +53,10 @@ function isCaptureMode(value: unknown): value is CaptureMode {
 
 function isCaptureResolution(value: unknown): value is CaptureResolution {
   return value === '1440p' || value === '4k';
+}
+
+function isViewerVolume(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
 }
 
 export function loadAppSettings(
@@ -71,6 +81,12 @@ export function loadAppSettings(
       captureAudio: typeof candidate.captureAudio === 'boolean'
         ? candidate.captureAudio
         : DEFAULT_SETTINGS.captureAudio,
+      viewerMuted: typeof candidate.viewerMuted === 'boolean'
+        ? candidate.viewerMuted
+        : DEFAULT_SETTINGS.viewerMuted,
+      viewerVolume: isViewerVolume(candidate.viewerVolume)
+        ? candidate.viewerVolume
+        : DEFAULT_SETTINGS.viewerVolume,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

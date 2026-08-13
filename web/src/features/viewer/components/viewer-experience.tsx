@@ -23,6 +23,7 @@ import { roomMetaLine } from '@/components/room/room-meta';
 import { RoomPanel } from '@/components/room/room-panel';
 import { TheatreChat } from '@/components/room/theatre-chat';
 import { useTheatreMode } from '@/hooks/use-theatre-mode';
+import { loadAppSettings, saveAppSettings } from '@/lib/settings/app-settings';
 import { useBitrateHistory } from '@/hooks/use-bitrate-history';
 import { useNow } from '@/hooks/use-now';
 import { useSessionState } from '@/hooks/use-session-state';
@@ -53,8 +54,8 @@ export function ViewerExperience({
   const [panelTab, setPanelTab] = useState<PanelTab>('chat');
   const { theatre, toggleTheatre, exitTheatre } = useTheatreMode();
   const [theatreChatOpen, setTheatreChatOpen] = useState(true);
-  const [muted, setMuted] = useState(true);
-  const [volume, setVolume] = useState(70);
+  const [muted, setMuted] = useState(() => loadAppSettings().viewerMuted);
+  const [volume, setVolume] = useState(() => loadAppSettings().viewerVolume);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [sourceSize, setSourceSize] = useState({ width: 0, height: 0 });
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -71,13 +72,39 @@ export function ViewerExperience({
     if (autoJoin) session.requestAccess(null);
   }, [autoJoin, session]);
   useEffect(() => {
-    if (videoRef.current && state.stream) videoRef.current.srcObject = state.stream;
+    const video = videoRef.current;
+    if (!video || !state.stream) return;
+    video.srcObject = state.stream;
+    const attemptPlayback = async () => {
+      try {
+        await video.play();
+      } catch (error) {
+        const blocked = error instanceof DOMException && error.name === 'NotAllowedError';
+        if (!blocked || video.muted) return;
+        // The browser refused unmuted autoplay (no gesture on this origin
+        // yet). Fall back to muted so the share still appears; this is not
+        // saved as the user's preference, and clicking unmute is itself the
+        // gesture that lets audio through.
+        setMuted(true);
+        video.muted = true;
+        try {
+          await video.play();
+        } catch {
+          // Still blocked: the muted autoplay attribute retries once frames
+          // arrive, so there is nothing further to do here.
+        }
+      }
+    };
+    void attemptPlayback();
   }, [state.stream]);
   useEffect(() => {
     if (!videoRef.current) return;
     videoRef.current.muted = muted;
     videoRef.current.volume = volume / 100;
-  }, [muted, volume]);
+    // state.stream is a dependency because the video element mounts with the
+    // stage: without it, a session that negotiates after mount would keep the
+    // element's default volume instead of the stored preference.
+  }, [muted, volume, state.stream]);
   useEffect(() => {
     const updateFullscreenState = () => setIsFullscreen(document.fullscreenElement === stageRef.current);
     document.addEventListener('fullscreenchange', updateFullscreenState);
@@ -115,8 +142,15 @@ export function ViewerExperience({
     void navigate('/');
   };
   const changeVolume = (event: ChangeEvent<HTMLInputElement>) => {
-    setVolume(Number(event.target.value));
+    const value = Number(event.target.value);
+    setVolume(value);
     setMuted(false);
+    saveAppSettings({ viewerVolume: value, viewerMuted: false });
+  };
+  const toggleMuted = () => {
+    const next = !muted;
+    setMuted(next);
+    saveAppSettings({ viewerMuted: next });
   };
   const panWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     if (displayMode !== 'pixel' || !viewportRef.current) return;
@@ -307,7 +341,7 @@ export function ViewerExperience({
               type="button"
               className="viewer-icon-button"
               aria-label={muted ? 'Unmute shared audio' : 'Mute shared audio'}
-              onClick={() => setMuted((value) => !value)}
+              onClick={toggleMuted}
             >
               <VolumeIcon muted={muted} />
             </button>

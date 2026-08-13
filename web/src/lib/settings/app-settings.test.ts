@@ -19,6 +19,8 @@ describe('app settings', () => {
       captureMode: 'text',
       captureResolution: '1440p',
       captureAudio: true,
+      viewerMuted: false,
+      viewerVolume: 70,
     });
   });
 
@@ -26,11 +28,14 @@ describe('app settings', () => {
     const storage = new FakeStorage();
     saveAppSettings({ captureMode: 'motion', forceRelay: true }, storage);
     saveAppSettings({ captureResolution: '4k' }, storage);
+    saveAppSettings({ viewerMuted: true, viewerVolume: 35 }, storage);
     expect(loadAppSettings(storage)).toEqual({
       forceRelay: true,
       captureMode: 'motion',
       captureResolution: '4k',
       captureAudio: true,
+      viewerMuted: true,
+      viewerVolume: 35,
     });
   });
 
@@ -38,13 +43,15 @@ describe('app settings', () => {
     const storage = new FakeStorage();
     storage.setItem(
       APP_SETTINGS_STORAGE_KEY,
-      JSON.stringify({ captureMode: 'ultra', captureResolution: '8k', captureAudio: 'yes', forceRelay: true }),
+      JSON.stringify({ captureMode: 'ultra', captureResolution: '8k', captureAudio: 'yes', forceRelay: true, viewerMuted: 'no', viewerVolume: 180 }),
     );
     expect(loadAppSettings(storage)).toEqual({
       forceRelay: true,
       captureMode: 'text',
       captureResolution: '1440p',
       captureAudio: true,
+      viewerMuted: false,
+      viewerVolume: 70,
     });
   });
 
@@ -56,6 +63,8 @@ describe('app settings', () => {
       captureMode: 'text',
       captureResolution: '1440p',
       captureAudio: true,
+      viewerMuted: false,
+      viewerVolume: 70,
     });
   });
 });
