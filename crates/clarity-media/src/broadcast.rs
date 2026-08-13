@@ -605,6 +605,11 @@ struct Shared {
     /// that leg instead of ending the broadcast; the next reconcile removes
     /// it.
     audio_leg_names: Mutex<std::collections::HashSet<String>>,
+    /// Branch elements of viewers whose teardown is in flight. A collapsing
+    /// connection keeps posting errors between its removal from `viewers`
+    /// and the branch leaving the pipeline; tracking the elements here keeps
+    /// those stragglers attributable so they cannot end the share.
+    dismantling: Mutex<Vec<gst::Element>>,
 }
 
 /// Registers a mix's leg elements for bus-error containment.
@@ -716,6 +721,7 @@ impl Broadcast {
             paused: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             audio_leg_names: Mutex::new(std::collections::HashSet::new()),
+            dismantling: Mutex::new(Vec::new()),
         });
 
         let pipeline = gst::Pipeline::new();
@@ -861,7 +867,8 @@ impl Broadcast {
             .map_err(|error| BroadcastError::Start(error.to_string()))?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let bus_thread = spawn_bus_thread(&pipeline, &shared, &shutdown)?;
+        let bus_thread =
+            spawn_bus_thread(&pipeline, &tee, audio_tee.as_ref(), &shared, &shutdown)?;
 
         Ok((
             Self {
@@ -1488,11 +1495,44 @@ impl Broadcast {
                         entry.video_sink_pad = Some(pad);
                     }
                 } else {
-                    // The viewer left mid-install; dismantle what was built.
-                    for element in installed.branch_elements.iter().rev() {
-                        let _ = element.set_state(gst::State::Null);
+                    // The viewer left mid-install (the bus watch can dismantle
+                    // a dying viewer concurrently now): its teardown snapshot
+                    // predates these pads, so take the fresh branch down here,
+                    // unlinking the tee tap under an idle probe exactly as
+                    // `dismantle_viewer` would, and releasing the request pads
+                    // that would otherwise stay linked to a removed branch.
+                    self.shared
+                        .dismantling
+                        .lock()
+                        .expect("dismantling lock")
+                        .extend(installed.branch_elements.iter().cloned());
+                    let pipeline = self.pipeline.clone();
+                    let elements = installed.branch_elements.clone();
+                    let webrtc_pad = installed.sink_pad.clone();
+                    let webrtc = webrtc.clone();
+                    let take_down = move || {
+                        for element in elements.iter().rev() {
+                            let _ = element.set_state(gst::State::Null);
+                        }
+                        let _ = pipeline.remove_many(&elements);
+                        if let Some(pad) = &webrtc_pad {
+                            webrtc.release_request_pad(pad);
+                        }
+                    };
+                    match &installed.tee_pad {
+                        Some(tee_pad) => {
+                            let tee = self.tee.clone();
+                            tee_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
+                                if let Some(peer) = pad.peer() {
+                                    let _ = pad.unlink(&peer);
+                                }
+                                tee.release_request_pad(pad);
+                                take_down();
+                                gst::PadProbeReturn::Remove
+                            });
+                        }
+                        None => take_down(),
                     }
-                    let _ = self.pipeline.remove_many(&installed.branch_elements);
                 }
             }
             Err(reason) => tracing::warn!(
@@ -1629,7 +1669,16 @@ impl Broadcast {
         if let Some(probe) = probe {
             valve_src.remove_probe(probe);
         }
-        installed?;
+        if let Err(reason) = installed {
+            // A failed swap must not strand the half-installed chain in the
+            // pipeline; the old chain is already gone, so the viewer ends up
+            // with no video branch, which the caller reports.
+            for element in elements.iter().rev() {
+                let _ = element.set_state(gst::State::Null);
+            }
+            let _ = self.pipeline.remove_many(elements);
+            return Err(reason);
+        }
         Ok(InstalledVideoBranch {
             branch_elements: elements.to_vec(),
             valve: None,
@@ -1667,27 +1716,13 @@ impl Broadcast {
     /// needs must never stall the caller — so the branch may outlive this
     /// call by a few seconds.
     pub fn remove_viewer(&self, peer_id: &str) {
-        self.shared
-            .display_names
-            .lock()
-            .expect("display name lock")
-            .remove(peer_id);
-        let Some(entry) = self
-            .shared
-            .viewers
-            .lock()
-            .expect("viewer lock")
-            .remove(peer_id)
-        else {
-            return;
-        };
-        let pipeline = self.pipeline.clone();
-        let tee = self.tee.clone();
-        let audio_tee = self.audio_tee.clone();
-        crate::teardown::spawn_teardown("clarity-media-viewer-teardown", move || {
-            settle_ice_gathering(&entry.webrtc, Instant::now() + Duration::from_secs(5));
-            dismantle_viewer(&pipeline, &tee, audio_tee.as_ref(), &entry);
-        });
+        remove_viewer_branch(
+            &self.shared,
+            &self.pipeline,
+            &self.tee,
+            self.audio_tee.as_ref(),
+            peer_id,
+        );
     }
 
     /// Applies a viewer's SDP answer; their queued candidates are flushed once
@@ -2046,15 +2081,58 @@ fn settle_ice_gathering(webrtc: &gst::Element, deadline: Instant) {
     }
 }
 
+/// Removes a viewer's entry and dismantles its branch on a background
+/// thread, shared by [`Broadcast::remove_viewer`] and the bus watch's error
+/// containment; `true` when the viewer was present. The branch moves into
+/// `dismantling` under the same viewer lock that drops the entry, so an
+/// error the dying connection posts mid-removal is always attributable to
+/// one of the two.
+fn remove_viewer_branch(
+    shared: &Arc<Shared>,
+    pipeline: &gst::Pipeline,
+    tee: &gst::Element,
+    audio_tee: Option<&gst::Element>,
+    peer_id: &str,
+) -> bool {
+    shared
+        .display_names
+        .lock()
+        .expect("display name lock")
+        .remove(peer_id);
+    let entry = {
+        let mut viewers = shared.viewers.lock().expect("viewer lock");
+        let Some(entry) = viewers.remove(peer_id) else {
+            return false;
+        };
+        shared
+            .dismantling
+            .lock()
+            .expect("dismantling lock")
+            .extend(entry.branch.iter().cloned());
+        entry
+    };
+    let shared = Arc::clone(shared);
+    let pipeline = pipeline.clone();
+    let tee = tee.clone();
+    let audio_tee = audio_tee.cloned();
+    crate::teardown::spawn_teardown("clarity-media-viewer-teardown", move || {
+        settle_ice_gathering(&entry.webrtc, Instant::now() + Duration::from_secs(5));
+        dismantle_viewer(&shared, &pipeline, &tee, audio_tee.as_ref(), &entry);
+    });
+    true
+}
+
 /// Unlinks a removed viewer's tee pads, each under its own idle probe so
 /// neither streaming thread ever pushes into a half-removed branch; the last
 /// probe to run dismantles the elements.
 fn dismantle_viewer(
+    shared: &Arc<Shared>,
     pipeline: &gst::Pipeline,
     tee: &gst::Element,
     audio_tee: Option<&gst::Element>,
     entry: &ViewerEntry,
 ) {
+    let shared = Arc::clone(shared);
     let pipeline = pipeline.clone();
     let tee = tee.clone();
     let audio_tee = audio_tee.cloned();
@@ -2065,6 +2143,7 @@ fn dismantle_viewer(
     let after_video = move || {
         match (&audio_tee, &audio_tee_pad) {
             (Some(audio_tee), Some(audio_pad)) => {
+                let shared = Arc::clone(&shared);
                 let pipeline = pipeline.clone();
                 let branch = branch.clone();
                 let audio_tee = audio_tee.clone();
@@ -2073,11 +2152,11 @@ fn dismantle_viewer(
                         let _ = pad.unlink(&peer);
                     }
                     audio_tee.release_request_pad(pad);
-                    dismantle_branch(&pipeline, &branch);
+                    finish_dismantle(&shared, &pipeline, &branch);
                     gst::PadProbeReturn::Remove
                 });
             }
-            _ => dismantle_branch(&pipeline, &branch),
+            _ => finish_dismantle(&shared, &pipeline, &branch),
         }
     };
     match &entry.tee_pad {
@@ -2214,14 +2293,63 @@ fn wire_caps_notify(
     Ok(())
 }
 
+/// What part of the broadcast a bus error originated in, found by walking the
+/// source element's parents. The SCTP and DTLS internals that fail when a
+/// viewer's browser dies live inside that viewer's `webrtcbin`, so the walk
+/// climbs until it reaches a registered branch element (the bin itself, or a
+/// branch element outside it matches directly).
+enum ErrorScope {
+    /// A live viewer's connection; the viewer fails alone.
+    Viewer(String),
+    /// A branch already being dismantled; the collapse keeps posting until
+    /// teardown finishes, and there is nothing left to do.
+    Dismantling,
+    /// The shared pipeline; fatal for the broadcast.
+    Shared,
+}
+
+fn error_scope(shared: &Shared, source: Option<&gst::Object>) -> ErrorScope {
+    let mut current = source.cloned();
+    while let Some(object) = current {
+        if let Some(element) = object.downcast_ref::<gst::Element>() {
+            let owner = shared
+                .viewers
+                .lock()
+                .expect("viewer lock")
+                .iter()
+                .find_map(|(peer_id, entry)| {
+                    entry.branch.contains(element).then(|| peer_id.clone())
+                });
+            if let Some(peer_id) = owner {
+                return ErrorScope::Viewer(peer_id);
+            }
+            if shared
+                .dismantling
+                .lock()
+                .expect("dismantling lock")
+                .contains(element)
+            {
+                return ErrorScope::Dismantling;
+            }
+        }
+        current = object.parent();
+    }
+    ErrorScope::Shared
+}
+
 fn spawn_bus_thread(
     pipeline: &gst::Pipeline,
+    tee: &gst::Element,
+    audio_tee: Option<&gst::Element>,
     shared: &Arc<Shared>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, BroadcastError> {
     let bus = pipeline
         .bus()
         .ok_or_else(|| BroadcastError::Start("the pipeline has no message bus".into()))?;
+    let pipeline = pipeline.clone();
+    let tee = tee.clone();
+    let audio_tee = audio_tee.cloned();
     let shared = Arc::clone(shared);
     let shutdown = Arc::clone(shutdown);
     std::thread::Builder::new()
@@ -2250,6 +2378,45 @@ fn spawn_bus_thread(
                                     "an audio stream failed; its audio drops from the mix"
                                 );
                                 continue;
+                            }
+                            // A failure inside one viewer's connection (its
+                            // SCTP association collapsing when the browser
+                            // tab closes, a branch element giving up) fails
+                            // that viewer alone: the branch is dismantled and
+                            // the failure surfaced as the viewer's connection
+                            // state, which the session layer's recovery
+                            // already handles. Only errors no viewer owns end
+                            // the share for everyone.
+                            match error_scope(&shared, message.src()) {
+                                ErrorScope::Viewer(peer_id) => {
+                                    tracing::warn!(
+                                        peer = %peer_id,
+                                        error = %error.error(),
+                                        "a viewer's connection failed; the share continues without it"
+                                    );
+                                    if remove_viewer_branch(
+                                        &shared,
+                                        &pipeline,
+                                        &tee,
+                                        audio_tee.as_ref(),
+                                        &peer_id,
+                                    ) {
+                                        let _ =
+                                            shared.events.send(BroadcastEvent::ViewerConnection {
+                                                peer_id,
+                                                state: ConnectionState::Failed,
+                                            });
+                                    }
+                                    continue;
+                                }
+                                ErrorScope::Dismantling => {
+                                    tracing::debug!(
+                                        error = %error.error(),
+                                        "a dismantling viewer branch posted an error; ignoring it"
+                                    );
+                                    continue;
+                                }
+                                ErrorScope::Shared => {}
                             }
                             end(
                                 &shared,
@@ -2480,6 +2647,26 @@ fn dismantle_branch(pipeline: &gst::Pipeline, branch: &[gst::Element]) {
         let _ = element.set_state(gst::State::Null);
     }
     let _ = pipeline.remove_many(branch);
+}
+
+/// How many dismantled elements stay registered for error attribution after
+/// leaving the pipeline. An error a dying connection posted can still sit in
+/// the bus queue when its branch is removed; its by-then-unparented source
+/// would read as a shared failure and end the broadcast. Generous next to the
+/// ~15 elements a branch holds and the 10-viewer room cap, so an entry only
+/// falls out long after its bus messages have drained.
+const DISMANTLED_HISTORY: usize = 512;
+
+/// Dismantles a removed viewer's branch. The branch stays in `dismantling`
+/// for error attribution (see [`DISMANTLED_HISTORY`]); the registry is
+/// pruned oldest-first instead of dropping the branch immediately.
+fn finish_dismantle(shared: &Shared, pipeline: &gst::Pipeline, branch: &[gst::Element]) {
+    dismantle_branch(pipeline, branch);
+    let mut dismantling = shared.dismantling.lock().expect("dismantling lock");
+    let excess = dismantling.len().saturating_sub(DISMANTLED_HISTORY);
+    if excess > 0 {
+        dismantling.drain(..excess);
+    }
 }
 
 /// Builds the shared audio path up to its tee: what the presenter hears (the
@@ -2760,7 +2947,9 @@ fn fit_within_capture_ceiling(width: i32, height: i32, ceiling: (i64, i64)) -> (
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_CAPTURE_CEILING, fit_within_capture_ceiling};
+    use super::*;
+    use crate::playback::{Playback, PlaybackConfig, PlaybackEvent};
+    use clarity_protocol::IceConfiguration;
 
     #[test]
     fn scales_common_sources_into_the_ceiling() {
@@ -2792,6 +2981,225 @@ mod tests {
         assert_eq!(
             fit_within_capture_ceiling(1280, 720, (1920, 1080)),
             (1280, 720)
+        );
+    }
+
+    const LIVE: &str = "viewer-live";
+    const DEAD: &str = "viewer-dead";
+
+    fn empty_ice() -> IceConfiguration {
+        IceConfiguration {
+            expires_at: "2026-01-01T00:00:00Z".into(),
+            ice_servers: vec![],
+        }
+    }
+
+    fn synthetic_config() -> BroadcastConfig {
+        BroadcastConfig {
+            source: SourceConfig::Synthetic(SyntheticSource {
+                width: 320,
+                height: 240,
+                frame_rate: 15,
+            }),
+            audio: AudioCapture::Disabled,
+            video_codecs: vec![VideoCodecId::Vp8],
+            frame_rate: 30,
+            ice: empty_ice(),
+            force_relay: false,
+            preview_frames: None,
+            capture_ceiling: None,
+        }
+    }
+
+    /// Renders media to null sinks so the test runs without a display.
+    // The crate denies unsafe code for its own logic; setting the test
+    // environment is the one exception, matching the integration suite.
+    #[allow(unsafe_code)]
+    fn headless() {
+        // SAFETY: the other tests in this binary never read the environment.
+        unsafe { std::env::set_var("CLARITY_MEDIA_HEADLESS", "1") };
+    }
+
+    /// The bug this contains: a viewer's browser tab closing kills its SCTP
+    /// association, the error reaches the bus from inside that viewer's
+    /// `webrtcbin`, and the whole broadcast used to end for everyone. Media
+    /// flows to a healthy viewer, a second viewer's connection posts a fatal
+    /// error from inside its bin, and the broadcast must surface that
+    /// viewer's failure while the healthy viewer keeps receiving.
+    #[tokio::test]
+    async fn an_error_inside_one_viewers_connection_fails_that_viewer_alone() {
+        headless();
+        let (broadcast, mut events) = match Broadcast::start(synthetic_config()) {
+            Ok(started) => started,
+            // A machine without the media runtime cannot run this test.
+            Err(_) => return,
+        };
+        let settings = EncoderSettings {
+            bitrate_kbps: 500,
+            adaptive: false,
+        };
+        broadcast
+            .add_viewer(LIVE, settings)
+            .expect("the healthy viewer builds");
+        broadcast
+            .add_viewer(DEAD, settings)
+            .expect("the dying viewer builds");
+        let (playback, mut playback_events) = Playback::start(PlaybackConfig {
+            frames: None,
+            native: None,
+            audio_samples: None,
+            ice: empty_ice(),
+            force_relay: false,
+        })
+        .expect("playback starts");
+
+        // Negotiate the healthy viewer only; the dying viewer's offers go
+        // unanswered, like a browser that joined and then went away.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut media = false;
+        while !media {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => panic!("media did not flow"),
+                event = events.recv() => match event.expect("broadcast stays alive") {
+                    BroadcastEvent::Offer { peer_id, sdp, .. } if peer_id == LIVE => {
+                        playback.accept_offer(&sdp).expect("offer applies");
+                    }
+                    BroadcastEvent::IceCandidate { peer_id, candidate, sdp_m_line_index }
+                        if peer_id == LIVE =>
+                    {
+                        playback.add_remote_candidate(sdp_m_line_index, &candidate);
+                    }
+                    BroadcastEvent::Ended { reason } => panic!("broadcast ended: {reason}"),
+                    _ => {}
+                },
+                event = playback_events.recv() => match event.expect("playback stays alive") {
+                    PlaybackEvent::Answer { sdp } => {
+                        broadcast.accept_answer(LIVE, &sdp).expect("answer applies");
+                    }
+                    PlaybackEvent::IceCandidate { candidate, sdp_m_line_index } => {
+                        broadcast.add_remote_candidate(LIVE, sdp_m_line_index, &candidate);
+                    }
+                    PlaybackEvent::Stats(stats) if stats.bitrate_kbps.unwrap_or(0) > 0 => {
+                        media = true;
+                    }
+                    PlaybackEvent::Ended { reason } => panic!("playback ended: {reason}"),
+                    _ => {}
+                },
+            }
+        }
+
+        // Fail the dying viewer from inside its connection bin, where the
+        // SCTP association errors when the peer vanishes.
+        let source = {
+            let viewers = broadcast.shared.viewers.lock().expect("viewer lock");
+            let webrtc = viewers
+                .get(DEAD)
+                .expect("the dying viewer exists")
+                .webrtc
+                .clone();
+            drop(viewers);
+            webrtc
+                .downcast_ref::<gst::Bin>()
+                .and_then(|bin| bin.children().into_iter().next())
+                .unwrap_or(webrtc)
+        };
+        gst::element_error!(
+            source,
+            gst::ResourceError::Write,
+            ("simulated: SCTP association went into error state")
+        );
+
+        // The broadcast reports the failure as that viewer's, stays alive,
+        // and keeps delivering to the healthy viewer.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut failed = false;
+        let mut stats_after_failure = 0;
+        while !(failed && stats_after_failure >= 2) {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!(
+                        "the failure was not contained (failed: {failed}, stats after: {stats_after_failure})"
+                    );
+                }
+                event = events.recv() => match event.expect("broadcast stays alive") {
+                    BroadcastEvent::ViewerConnection {
+                        peer_id,
+                        state: ConnectionState::Failed,
+                    } if peer_id == DEAD => failed = true,
+                    BroadcastEvent::Ended { reason } => {
+                        panic!("one viewer's death ended the broadcast: {reason}");
+                    }
+                    _ => {}
+                },
+                event = playback_events.recv() => match event.expect("playback stays alive") {
+                    PlaybackEvent::Stats(stats)
+                        if failed && stats.bitrate_kbps.unwrap_or(0) > 0 =>
+                    {
+                        stats_after_failure += 1;
+                    }
+                    PlaybackEvent::Ended { reason } => {
+                        panic!("the healthy viewer's playback ended: {reason}");
+                    }
+                    _ => {}
+                },
+            }
+        }
+        assert!(
+            !broadcast
+                .shared
+                .viewers
+                .lock()
+                .expect("viewer lock")
+                .contains_key(DEAD),
+            "the failed viewer's entry is removed"
+        );
+
+        broadcast.close();
+        playback.close();
+        assert!(
+            crate::teardown::drain_teardowns(Duration::from_secs(30)),
+            "media teardown completed before process exit"
+        );
+    }
+
+    /// An error owned by no viewer — here from the shared tee — still ends
+    /// the broadcast for everyone, exactly as before.
+    #[tokio::test]
+    async fn an_error_outside_any_viewer_ends_the_broadcast() {
+        headless();
+        let (broadcast, mut events) = match Broadcast::start(synthetic_config()) {
+            Ok(started) => started,
+            Err(_) => return,
+        };
+        broadcast
+            .add_viewer(
+                LIVE,
+                EncoderSettings {
+                    bitrate_kbps: 500,
+                    adaptive: false,
+                },
+            )
+            .expect("viewer builds");
+        gst::element_error!(
+            broadcast.tee,
+            gst::ResourceError::Write,
+            ("simulated: shared pipeline failure")
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => panic!("the broadcast did not end"),
+                event = events.recv() => {
+                    if let Some(BroadcastEvent::Ended { .. }) = event {
+                        break;
+                    }
+                }
+            }
+        }
+        broadcast.close();
+        assert!(
+            crate::teardown::drain_teardowns(Duration::from_secs(30)),
+            "media teardown completed before process exit"
         );
     }
 }
