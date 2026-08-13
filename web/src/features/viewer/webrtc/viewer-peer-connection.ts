@@ -111,15 +111,7 @@ export class ViewerPeerConnection {
         sdpMLineIndex: value.sdpMLineIndex ?? null,
       });
     };
-    connection.ontrack = ({ track, streams }) => {
-      const stream = streams[0];
-      if (stream) {
-        this.#stream = stream;
-      } else if (!this.#stream.getTracks().some((existing) => existing.id === track.id)) {
-        this.#stream.addTrack(track);
-      }
-      this.#options.onStream(this.#stream);
-    };
+    connection.ontrack = ({ track }) => this.#adoptTrack(track);
     connection.ondatachannel = ({ channel }) => {
       if (channel.label !== CHAT_CHANNEL_LABEL) return;
       this.#adoptChatChannel(channel);
@@ -132,6 +124,31 @@ export class ViewerPeerConnection {
     this.#stats.start();
     this.#connection = connection;
     return connection;
+  }
+
+  /**
+   * Accumulates received tracks into the one locally-owned stream. The native
+   * presenter signals msid only at the ssrc level, so browsers can deliver
+   * audio and video in different remote streams; adopting `event.streams`
+   * would let whichever ontrack fired last win and transiently drop a track.
+   * The video element follows track changes on the stream, so mutating this
+   * stable object is enough and its identity never changes mid-connection.
+   */
+  #adoptTrack(track: MediaStreamTrack): void {
+    const stream = this.#stream;
+    if (stream.getTracks().some((existing) => existing.id === track.id)) return;
+    // A renegotiation replaces the sender's track; drop the stale one of the
+    // same kind so the element does not keep a dead track around.
+    for (const existing of stream.getTracks()) {
+      if (existing.kind === track.kind) stream.removeTrack(existing);
+    }
+    stream.addTrack(track);
+    track.addEventListener('ended', () => {
+      stream.removeTrack(track);
+      // close() swaps in a fresh stream; only report on the live one.
+      if (stream === this.#stream) this.#options.onStream(stream);
+    });
+    this.#options.onStream(stream);
   }
 
   #adoptChatChannel(channel: RTCDataChannel): void {
