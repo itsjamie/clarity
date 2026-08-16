@@ -12,15 +12,36 @@
 //!
 //! This reproduces the ALR half faithfully: while application-limited it HOLDS
 //! the measured capacity instead of letting an idle estimate drop it. It
-//! reproduces the probe half with real content rather than synthetic padding: the
-//! encoder runs in VBR, so a static screen costs almost nothing and a busy screen
-//! bursts up to the held capacity — and that real burst is what re-measures the
-//! link. (webrtcbin exposes no pacer to inject probe packets, and NVENC's VBR
-//! will not pad a static frame, so padding-based probing is not available here.)
+//! reproduces the probe half with real content rather than synthetic padding:
+//! the encoder runs in VBR with its peak held above the target, so a static
+//! screen costs almost nothing and a busy screen bursts past the current
+//! belief — and that real burst is what re-measures the link. (webrtcbin
+//! exposes no pacer to inject probe packets, and NVENC's VBR will not pad a
+//! static frame, so padding-based probing is not available here.)
+//!
+//! The estimator's absolute value goes stale while the sender is
+//! application-limited: its state cannot be corrected from outside
+//! (`estimated-bitrate` is only writable before the element starts), so after
+//! an idle period it reports a collapsed number and climbs back at only ~8%/s.
+//! Adopting that number on the first busy frame would crush the encoder
+//! exactly when the user starts doing something. The controller therefore
+//! leaves ALR into a *validating* state: capacity is held while the estimate
+//! climbs, a sustained estimator decrease is treated as fresh congestion
+//! evidence and answered with a multiplicative backoff from the measured send
+//! rate (the estimator's own response, re-anchored to a number that is not
+//! stale), and absolute tracking resumes only once the estimate has caught
+//! back up to the held capacity.
+
+use std::time::{Duration, Instant};
 
 /// Below this fraction of the current target, the encoder is judged
 /// application-limited (idle / static content) rather than network-limited.
 const ALR_FRACTION: f32 = 0.75;
+
+/// `kbps * num / den`, widened so a large configured ceiling cannot overflow.
+fn frac(kbps: u32, num: u64, den: u64) -> u32 {
+    u32::try_from(u64::from(kbps) * num / den).unwrap_or(u32::MAX)
+}
 
 /// The encoder rate to apply after folding in one estimator update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,12 +52,26 @@ pub(crate) struct RateCommand {
     pub max_kbps: u32,
 }
 
+/// How much the estimator's absolute value is currently trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Belief {
+    /// The estimate has been at capacity since the last application-limited
+    /// period: it is live, and ordinary congestion control applies.
+    Tracking,
+    /// The estimate collapsed during an application-limited period and has not
+    /// caught back up: its absolute value is stale. `peak_kbps` is the highest
+    /// estimate seen since it started recovering; a drop well below that peak
+    /// is fresh overuse evidence even though the absolute value is not.
+    Validating { peak_kbps: u32 },
+}
+
 /// Tracks a belief about the link's video capacity, updated from the congestion
 /// estimator but held steady while the encoder is application-limited.
 pub(crate) struct AdaptiveController {
     floor_kbps: u32,
     ceiling_kbps: u32,
     capacity_kbps: u32,
+    belief: Belief,
 }
 
 impl AdaptiveController {
@@ -46,6 +81,9 @@ impl AdaptiveController {
             floor_kbps,
             ceiling_kbps,
             capacity_kbps: start_kbps.clamp(floor_kbps, ceiling_kbps),
+            // The estimator is seeded with the starting rate, so it opens in
+            // sync with the belief.
+            belief: Belief::Tracking,
         }
     }
 
@@ -59,29 +97,110 @@ impl AdaptiveController {
 
         if application_limited {
             // Idle or static: the encoder is sending little by choice, so the
-            // estimator's low reading reflects a lack of content, not congestion.
-            // Hold capacity; accept only an increase (the estimator rarely raises
-            // while there is nothing to measure).
+            // estimator's low reading reflects a lack of content, not
+            // congestion. Hold capacity; accept only an increase. A collapsed
+            // reading also marks the estimator stale, so the next busy period
+            // starts by validating it rather than trusting it.
             if estimate_kbps > self.capacity_kbps {
                 self.capacity_kbps = estimate_kbps;
+                self.belief = Belief::Tracking;
+            } else if estimate_kbps < frac(self.capacity_kbps, 9, 10) {
+                self.belief = Belief::Validating {
+                    peak_kbps: estimate_kbps,
+                };
             }
         } else {
-            // Real content is saturating the encoder, so the estimate reflects
-            // the true link: track it up when there is headroom and back off at
-            // once when it drops. This is ordinary congestion control.
-            self.capacity_kbps = estimate_kbps;
+            match self.belief {
+                // Real content is saturating the encoder and the estimate is
+                // live, so it reflects the true link: track it up when there
+                // is headroom and back off at once when it drops. This is
+                // ordinary congestion control.
+                Belief::Tracking => self.capacity_kbps = estimate_kbps,
+                Belief::Validating { peak_kbps } => {
+                    if estimate_kbps >= frac(self.capacity_kbps, 9, 10) {
+                        // The burst validated the held capacity: the estimate
+                        // caught up, so its absolute value is live again.
+                        self.capacity_kbps = self.capacity_kbps.max(estimate_kbps);
+                        self.belief = Belief::Tracking;
+                    } else if estimate_kbps < frac(peak_kbps, 23, 25) {
+                        // The estimator pushed back down against a real burst:
+                        // fresh overuse. Its absolute value is still stale
+                        // (one decrease is a 5% step off a collapsed number),
+                        // so apply its multiplicative backoff to the measured
+                        // send rate instead — the same response, re-anchored.
+                        // The 0.92 trigger needs two consecutive decreases, so
+                        // a single spurious detection cannot fire it.
+                        self.capacity_kbps = self
+                            .capacity_kbps
+                            .min(frac(actual_send_kbps, 17, 20));
+                        self.belief = Belief::Validating {
+                            peak_kbps: estimate_kbps,
+                        };
+                    } else {
+                        // Still climbing back toward the held capacity: hold,
+                        // and remember the high-water mark.
+                        self.belief = Belief::Validating {
+                            peak_kbps: peak_kbps.max(estimate_kbps),
+                        };
+                    }
+                }
+            }
         }
         self.capacity_kbps = self.capacity_kbps.clamp(self.floor_kbps, self.ceiling_kbps);
 
         RateCommand {
             target_kbps: self.capacity_kbps,
-            max_kbps: self.capacity_kbps,
+            // Peak headroom above the target lets a busy screen burst past the
+            // current belief; the estimator can only raise what it can measure.
+            max_kbps: frac(self.capacity_kbps, 3, 2).min(self.ceiling_kbps),
         }
     }
 
     #[cfg(test)]
     pub fn capacity_kbps(&self) -> u32 {
         self.capacity_kbps
+    }
+}
+
+/// Measures the video send rate from a monotonically growing byte counter,
+/// sampled on the estimator's update cadence but averaged over a fixed window.
+/// This replaces the 2-second stats poll as the controller's send-rate input:
+/// ALR classification needs a reading fresh enough to catch a busy/static
+/// transition before the estimator reacts to it.
+pub(crate) struct SendRateSampler {
+    window_start: Option<(u64, Instant)>,
+    kbps: u32,
+}
+
+/// Wide enough to smooth frame-size jitter, narrow enough that a busy/static
+/// transition is seen before the estimator's 1-second receive window turns
+/// over and anchors a decrease to the collapsed content rate.
+const SAMPLE_WINDOW: Duration = Duration::from_millis(500);
+
+impl SendRateSampler {
+    pub fn new() -> Self {
+        Self {
+            window_start: None,
+            kbps: 0,
+        }
+    }
+
+    /// Folds in the byte counter's current reading and returns the rate over
+    /// the last completed window; zero until the first window completes.
+    pub fn sample(&mut self, bytes_sent: u64, now: Instant) -> u32 {
+        let Some((window_bytes, window_at)) = self.window_start else {
+            self.window_start = Some((bytes_sent, now));
+            return 0;
+        };
+        let elapsed = now.saturating_duration_since(window_at);
+        if elapsed >= SAMPLE_WINDOW {
+            let bits = bytes_sent.saturating_sub(window_bytes).saturating_mul(8);
+            // Bits per millisecond is kbit per second.
+            let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX).max(1);
+            self.kbps = u32::try_from(bits / millis).unwrap_or(u32::MAX);
+            self.window_start = Some((bytes_sent, now));
+        }
+        self.kbps
     }
 }
 
@@ -101,15 +220,15 @@ mod tests {
         assert_eq!(ctl.capacity_kbps(), 4_500, "idle estimate must not lower capacity");
     }
 
-    // With real content saturating the encoder, a genuine congestion drop is
-    // honored immediately.
+    // With real content saturating the encoder and a live estimate, a genuine
+    // congestion drop is honored immediately.
     #[test]
     fn backs_off_on_real_congestion() {
         let mut ctl = AdaptiveController::new(600, 6_000, 4_500);
         // Sending near capacity (not application-limited); estimate drops.
         let cmd = ctl.on_estimate(2_000, 4_400);
         assert_eq!(cmd.target_kbps, 2_000);
-        assert_eq!(cmd.max_kbps, 2_000);
+        assert_eq!(cmd.max_kbps, 3_000, "the VBR peak keeps burst headroom above the target");
     }
 
     // A busy screen re-measures the link: capacity climbs to the estimate.
@@ -147,5 +266,83 @@ mod tests {
         assert_eq!(ctl.capacity_kbps(), 600);
         ctl.on_estimate(99_000, 4_000); // above ceiling
         assert_eq!(ctl.capacity_kbps(), 6_000);
+    }
+
+    // The core of the stuck-low symptom: after an idle period the estimate is
+    // collapsed and only climbs ~8%/s, so the first busy frames must not have
+    // capacity snapped down to it. Hold until the estimate catches up, then
+    // resume ordinary tracking.
+    #[test]
+    fn alr_exit_holds_until_the_estimate_catches_up() {
+        let mut ctl = AdaptiveController::new(600, 6_000, 4_500);
+        for _ in 0..10 {
+            ctl.on_estimate(700, 300); // static screen; estimate collapsed
+        }
+        // Content turns busy while the estimate is still stale.
+        let cmd = ctl.on_estimate(750, 4_400);
+        assert_eq!(cmd.target_kbps, 4_500, "the collapsed estimate must not crush the burst");
+        // The estimate climbs back; capacity holds the whole way up.
+        for estimate in [900, 1_500, 2_500, 3_900] {
+            assert_eq!(ctl.on_estimate(estimate, 4_400).target_kbps, 4_500);
+        }
+        // Caught up (>= 90% of capacity): validated.
+        assert_eq!(ctl.on_estimate(4_100, 4_400).target_kbps, 4_500);
+        // Ordinary tracking resumes, decreases included.
+        assert_eq!(ctl.on_estimate(4_000, 4_300).target_kbps, 4_000);
+    }
+
+    // While validating, a sustained estimator decrease is real overuse
+    // evidence even though the absolute estimate is stale: back off from the
+    // measured send rate, the way the estimator itself would.
+    #[test]
+    fn congestion_while_validating_backs_off_from_the_send_rate() {
+        let mut ctl = AdaptiveController::new(600, 6_000, 4_500);
+        for _ in 0..5 {
+            ctl.on_estimate(700, 300);
+        }
+        ctl.on_estimate(750, 4_400); // busy onset; hold at 4_500, peak 750
+        // Two estimator decreases (below 92% of the peak) against the burst.
+        let cmd = ctl.on_estimate(680, 4_400);
+        assert_eq!(cmd.target_kbps, 3_740, "0.85 of the measured send rate");
+    }
+
+    // A single 5% estimator decrease can be spurious (idle jitter); it must
+    // not trigger the backoff on its own.
+    #[test]
+    fn spurious_single_decrease_while_validating_is_ignored() {
+        let mut ctl = AdaptiveController::new(600, 6_000, 4_500);
+        for _ in 0..5 {
+            ctl.on_estimate(700, 300);
+        }
+        ctl.on_estimate(750, 4_400); // busy onset; peak 750
+        let cmd = ctl.on_estimate(715, 4_400); // one 0.95x step: within the band
+        assert_eq!(cmd.target_kbps, 4_500);
+    }
+
+    // The VBR peak carries 1.5x headroom over the target, capped at the
+    // ceiling, so a burst can overshoot the current belief and be measured.
+    #[test]
+    fn peak_headroom_is_capped_at_the_ceiling() {
+        let mut ctl = AdaptiveController::new(600, 6_000, 4_500);
+        let cmd = ctl.on_estimate(4_500, 4_400);
+        assert_eq!(cmd.max_kbps, 6_000, "1.5x of 4_500 exceeds the ceiling");
+    }
+
+    #[test]
+    fn samples_rate_over_the_window() {
+        let mut sampler = SendRateSampler::new();
+        let t0 = Instant::now();
+        assert_eq!(sampler.sample(0, t0), 0);
+        assert_eq!(
+            sampler.sample(10_000, t0 + Duration::from_millis(100)),
+            0,
+            "no rate until the first window completes"
+        );
+        // 250 kB over 500 ms is 4_000 kbit/s.
+        assert_eq!(sampler.sample(250_000, t0 + Duration::from_millis(500)), 4_000);
+        // Mid-window reads return the last completed window's rate.
+        assert_eq!(sampler.sample(260_000, t0 + Duration::from_millis(600)), 4_000);
+        // A near-idle window drops the rate promptly.
+        assert_eq!(sampler.sample(260_000, t0 + Duration::from_millis(1_000)), 160);
     }
 }

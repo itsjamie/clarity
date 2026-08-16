@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::capture::CaptureStream;
 use crate::ice::{IceEndpoints, ice_endpoints};
 use crate::playback::{ConnectionState, FrameSink, TWCC_EXTENSION_URI, frame_appsink};
-use crate::rate::AdaptiveController;
+use crate::rate::{AdaptiveController, SendRateSampler};
 use crate::stats::{self, SenderStats, StatsBaseline};
 
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
@@ -656,10 +656,12 @@ struct ViewerEntry {
     /// when adaptive, or the fixed ceiling. Written from the estimator
     /// callback and read by the stats reporter, so it is lock-free.
     target_kbps: Arc<AtomicU32>,
-    /// The encoder's recently measured video output in kbps, written by the
-    /// stats reporter and read by the adaptive controller to detect the
-    /// application-limited region. Zero until the first stats sample.
-    actual_send_kbps: Arc<AtomicU32>,
+    /// Total video RTP bytes handed to the connection, counted by a pad probe
+    /// on the video sink pad. The adaptive controller derives its send-rate
+    /// reading from this at the estimator's cadence; the 2-second stats poll
+    /// is far too stale to classify the application-limited region around
+    /// busy/static transitions.
+    video_bytes_sent: Arc<AtomicU64>,
     /// The codec this viewer's branch encodes with: the top-ranked codec
     /// until the answer arrives, the negotiated codec after.
     codec: VideoCodec,
@@ -1181,7 +1183,7 @@ impl Broadcast {
             encoding.bitrate_kbps
         };
         let target_kbps = Arc::new(AtomicU32::new(initial_kbps));
-        let actual_send_kbps = Arc::new(AtomicU32::new(0));
+        let video_bytes_sent = Arc::new(AtomicU64::new(0));
         // The branch reports the top-ranked codec until the answer's pick
         // attaches the real encoder.
         let codec = self.shared.top_codec();
@@ -1321,7 +1323,7 @@ impl Broadcast {
                 encoding.bitrate_kbps,
                 self.audio_tee.is_some(),
                 Arc::clone(&target_kbps),
-                Arc::clone(&actual_send_kbps),
+                Arc::clone(&video_bytes_sent),
             );
         }
         if audio_queue.is_some()
@@ -1374,7 +1376,7 @@ impl Broadcast {
                 queued_candidates: Vec::new(),
                 stats_baseline: None,
                 target_kbps,
-                actual_send_kbps,
+                video_bytes_sent,
                 codec,
                 encode: Vec::new(),
                 video_sink_pad: None,
@@ -1411,6 +1413,7 @@ impl Broadcast {
         let valve = entry.video_valve.clone();
         let old = entry.encode.clone();
         let sink_pad = entry.video_sink_pad.clone();
+        let video_bytes_sent = Arc::clone(&entry.video_bytes_sent);
         let target_kbps = entry.target_kbps.load(Ordering::Relaxed);
         let paused = self.shared.paused.load(Ordering::SeqCst);
         drop(viewers);
@@ -1445,7 +1448,7 @@ impl Broadcast {
         let installed = if attached {
             self.swap_encode_chain(&valve, &old, &sink_pad, &elements)
         } else {
-            self.attach_video_branch(&webrtc, paused, &elements)
+            self.attach_video_branch(&webrtc, paused, &elements, video_bytes_sent)
         };
         match installed {
             Ok(installed) => {
@@ -1551,6 +1554,7 @@ impl Broadcast {
         webrtc: &gst::Element,
         paused: bool,
         encode: &[gst::Element],
+        video_bytes_sent: Arc<AtomicU64>,
     ) -> Result<InstalledVideoBranch, String> {
         // A shallow leaky queue decouples this viewer from the shared source
         // and drops stale frames instead of building latency when the encoder
@@ -1580,6 +1584,26 @@ impl Broadcast {
             .request_pad_simple("sink_0")
             .ok_or("the connection rejected the video stream")?;
         sink_pad.set_property("msid", MEDIA_STREAM_ID);
+        // Count the video RTP bytes entering the connection; the adaptive
+        // controller reads its send rate off this counter at the estimator's
+        // cadence. The connection pad outlives codec swaps, so the counter
+        // runs for the branch's whole life.
+        sink_pad.add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+            move |_, info| {
+                let bytes = match &info.data {
+                    Some(gst::PadProbeData::Buffer(buffer)) => buffer.size() as u64,
+                    Some(gst::PadProbeData::BufferList(list)) => {
+                        list.iter().map(|buffer| buffer.size() as u64).sum()
+                    }
+                    _ => 0,
+                };
+                if bytes > 0 {
+                    video_bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
         elements
             .last()
             .expect("the encode chain is never empty")
@@ -2475,11 +2499,6 @@ fn request_all_stats(shared: &Arc<Shared>) {
                     });
                     bitrate
                 });
-                // Feed the measured output to the adaptive controller so it can
-                // tell an idle screen from a congested link.
-                if let Some(kbps) = bitrate {
-                    entry.actual_send_kbps.store(kbps, Ordering::Relaxed);
-                }
                 (
                     bitrate,
                     entry.target_kbps.load(Ordering::Relaxed),
@@ -2502,12 +2521,6 @@ fn request_all_stats(shared: &Arc<Shared>) {
     }
 }
 
-/// Attaches GStreamer's GCC bandwidth estimator to this viewer's connection
-/// through webrtcbin's aux-sender hook and feeds its estimate through the
-/// application-limited-region controller. The transport-wide estimate has the
-/// fixed audio budget subtracted so congestion throttles video and never audio;
-/// the controller then holds the rate steady on an idle screen (where the raw
-/// estimate collapses) instead of chasing it down. See [`crate::rate`].
 /// The multi-codec caps the video transceiver advertises: one structure per
 /// ranked codec, payload types 96 upward in rank order.
 fn offered_caps(codecs: &[VideoCodec]) -> gst::Caps {
@@ -2574,16 +2587,24 @@ fn narrow_codec_preferences(webrtc: &gst::Element, codec: VideoCodec, pt: u32) {
     }
 }
 
+/// Attaches GStreamer's GCC bandwidth estimator to this viewer's connection
+/// through webrtcbin's aux-sender hook and feeds its estimate through the
+/// application-limited-region controller. The transport-wide estimate has the
+/// fixed audio budget subtracted so congestion throttles video and never
+/// audio; the measured send rate comes from the video byte counter, so it
+/// needs no such correction. The controller holds the rate steady on an idle
+/// screen (where the raw estimate collapses) instead of chasing it down, and
+/// keeps holding through busy onset until the estimate has re-validated the
+/// held capacity. See [`crate::rate`].
 fn wire_gcc_bwe(
     webrtc: &gst::Element,
     rate_target: RateTarget,
     ceiling_kbps: u32,
     has_audio: bool,
     target_kbps: Arc<AtomicU32>,
-    actual_send_kbps: Arc<AtomicU32>,
+    video_bytes_sent: Arc<AtomicU64>,
 ) {
     let audio_bps = if has_audio { AUDIO_BITRATE_BPS } else { 0 };
-    let audio_kbps = audio_bps / 1000;
     let min_bps = audio_bps + VIDEO_MIN_KBPS * 1000;
     let max_bps = audio_bps + ceiling_kbps.saturating_mul(1000);
     let start_bps = audio_bps + start_video_kbps(ceiling_kbps) * 1000;
@@ -2598,20 +2619,22 @@ fn wire_gcc_bwe(
         bwe.set_property("estimated-bitrate", start_bps);
         let rate_target = Arc::clone(&rate_target);
         let target_kbps = Arc::clone(&target_kbps);
-        let actual_send_kbps = Arc::clone(&actual_send_kbps);
+        let video_bytes_sent = Arc::clone(&video_bytes_sent);
         let controller = std::sync::Mutex::new(AdaptiveController::new(
             VIDEO_MIN_KBPS,
             ceiling_kbps,
             start_video_kbps(ceiling_kbps),
         ));
+        let sampler = std::sync::Mutex::new(SendRateSampler::new());
         bwe.connect_notify(Some("estimated-bitrate"), move |bwe, _| {
             let estimate = bwe.property::<u32>("estimated-bitrate");
             let estimate_kbps = estimate.saturating_sub(audio_bps).max(VIDEO_MIN_KBPS * 1000) / 1000;
-            // The stats reporter measures the whole transport; the video output
-            // is that minus the fixed audio budget.
-            let actual_kbps = actual_send_kbps
-                .load(Ordering::Relaxed)
-                .saturating_sub(audio_kbps);
+            // The byte counter covers video only, so unlike the transport-wide
+            // estimate no audio budget needs subtracting here.
+            let actual_kbps = sampler
+                .lock()
+                .expect("send rate lock")
+                .sample(video_bytes_sent.load(Ordering::Relaxed), Instant::now());
             let command = controller
                 .lock()
                 .expect("rate lock")
