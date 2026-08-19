@@ -649,4 +649,101 @@ mod scenarios {
             );
         }
     }
+
+    /// `pacing-factor` scales both the pacer's drain budget and its 30ms
+    /// force-leak cap (see `State::create_buffer_list`). Feeds a constant
+    /// burst offered at 1.5x a fixed 1Mbps estimate directly at the pacer,
+    /// one `BURST_TIME` tick at a time (mirroring the cadence of the real
+    /// background task, but driven synchronously so the test stays
+    /// deterministic), and counts how many ticks had to force-leak to keep
+    /// the queue under the cap.
+    ///
+    /// At the default factor of 1.0 the pacer's drain rate (1x the
+    /// estimate) is below the 1.5x burst, so the queue outgrows the 30ms cap
+    /// and force-leak has to engage repeatedly: this is the characterized
+    /// baseline behaviour, unchanged by adding the property. At 2.5 (the
+    /// value `wire_gcc_bwe` sets in `broadcast.rs`) the drain rate
+    /// comfortably exceeds the 1.5x burst, so ordinary budget alone drains
+    /// it and force-leak never triggers.
+    #[test]
+    fn pacing_factor_changes_force_leak_under_burst() {
+        let (leaks_at_1_0, drained_at_1_0, offered) = run_pacer_burst(1.0);
+        let (leaks_at_2_5, drained_at_2_5, offered_again) = run_pacer_burst(2.5);
+        assert_eq!(offered, offered_again, "both runs offer the same burst");
+
+        assert!(
+            leaks_at_1_0 > 0,
+            "factor 1.0: a 1.5x burst should force-leak, as the \
+             characterization baseline shows"
+        );
+        assert_eq!(
+            leaks_at_2_5, 0,
+            "factor 2.5: a 1.5x burst is within the pacer's drain rate and \
+             should never force-leak"
+        );
+
+        // Both factors are expected to actually drain the burst (force-leak
+        // guarantees that at 1.0; ordinary budget does at 2.5) rather than
+        // one of them silently stalling.
+        assert!(
+            drained_at_1_0 as f64 >= offered as f64 * 0.9,
+            "factor 1.0 should still drain nearly all of the offered burst \
+             via force-leak, drained {drained_at_1_0} of {offered} bits"
+        );
+        assert!(
+            drained_at_2_5 as f64 >= offered as f64 * 0.9,
+            "factor 2.5 should drain nearly all of the offered burst via \
+             ordinary budget, drained {drained_at_2_5} of {offered} bits"
+        );
+    }
+
+    /// Drives `State::create_buffer_list` directly (bypassing the real
+    /// background pacer task, whose own timing is real-wall-clock and would
+    /// race with the synthetic clock this drives) with a constant burst
+    /// offered at 1.5x a fixed 1Mbps estimate, for one second of synthetic
+    /// time at `BURST_TIME` ticks. Returns
+    /// `(force_leak_ticks, drained_bits, offered_bits)`.
+    fn run_pacer_burst(pacing_factor: f64) -> (usize, u64, u64) {
+        let _lock = RIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        gst::init().unwrap();
+
+        const ESTIMATE: u32 = 1_000_000;
+        const PACKET_SIZE: usize = 1200;
+        const TICKS: u32 = 200; // 1s of synthetic time at BURST_TIME (5ms) ticks
+        let offered_bps = ESTIMATE as f64 * 1.5;
+
+        let bwe = glib::Object::new::<crate::gcc::BandwidthEstimator>();
+        bwe.set_property("estimated-bitrate", ESTIMATE);
+        bwe.set_property("min-bitrate", 100_000u32);
+        bwe.set_property("max-bitrate", 8_192_000u32);
+        bwe.set_property("pacing-factor", pacing_factor);
+
+        let mut owed_bits = 0.0f64;
+        let mut offered_bits_total = 0u64;
+        let mut drained_bits_total = 0u64;
+        for _ in 0..TICKS {
+            owed_bits += offered_bps * super::super::BURST_TIME.whole_nanoseconds() as f64
+                / 1_000_000_000.0;
+            {
+                let imp = bwe.imp();
+                let mut state = imp.state.lock().unwrap();
+                while owed_bits >= (PACKET_SIZE * 8) as f64 {
+                    state.buffers.push_front(gst::Buffer::with_size(PACKET_SIZE).unwrap());
+                    owed_bits -= (PACKET_SIZE * 8) as f64;
+                    offered_bits_total += (PACKET_SIZE * 8) as u64;
+                }
+            }
+
+            clock::advance_to(clock::stream() + super::super::BURST_TIME);
+
+            let imp = bwe.imp();
+            let mut state = imp.state.lock().unwrap();
+            let list = state.create_buffer_list(&bwe);
+            drained_bits_total += list.iter().map(|b| b.size() as u64 * 8).sum::<u64>();
+        }
+
+        let imp = bwe.imp();
+        let leaks = imp.state.lock().unwrap().force_leak_count;
+        (leaks, drained_bits_total, offered_bits_total)
+    }
 }

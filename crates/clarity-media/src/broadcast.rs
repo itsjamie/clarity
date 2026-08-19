@@ -2628,6 +2628,11 @@ fn wire_gcc_bwe(
         bwe.set_property("min-bitrate", min_bps);
         bwe.set_property("max-bitrate", max_bps);
         bwe.set_property("estimated-bitrate", start_bps);
+        // Only the vendored element has this property; the stock `rtpgccbwe`
+        // fallback doesn't, so guard the set to avoid a panic there.
+        if bwe.find_property("pacing-factor").is_some() {
+            bwe.set_property("pacing-factor", 2.5f64);
+        }
         let rate_target = Arc::clone(&rate_target);
         let target_kbps = Arc::clone(&target_kbps);
         let video_bytes_sent = Arc::clone(&video_bytes_sent);

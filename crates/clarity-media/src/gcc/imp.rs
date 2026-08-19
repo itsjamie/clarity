@@ -38,6 +38,7 @@ type BufferList = SmallVec<[gst::Buffer; 10]>;
 const DEFAULT_MIN_BITRATE: Bitrate = 1000;
 const DEFAULT_ESTIMATED_BITRATE: Bitrate = 2_048_000;
 const DEFAULT_MAX_BITRATE: Bitrate = 8_192_000;
+const DEFAULT_PACING_FACTOR: f64 = 1.0;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -771,6 +772,14 @@ struct State {
     buffers: VecDeque<gst::Buffer>,
     // Number of bits remaining from previous burst
     budget_offset: i64,
+    // Multiple of estimated_bitrate at which the leaky bucket drains
+    pacing_factor: f64,
+
+    /// Test instrumentation only: counts calls to `create_buffer_list` where
+    /// the 30ms cap forced eviction beyond the normal drain budget. Read by
+    /// the pacing-factor scenario test; has no effect on production builds.
+    #[cfg(test)]
+    force_leak_count: usize,
 
     flow_return: Result<gst::FlowSuccess, gst::FlowError>,
     last_push: Instant,
@@ -798,6 +807,9 @@ impl Default for State {
             clock_entry: None,
             last_push: now(),
             budget_offset: 0,
+            pacing_factor: DEFAULT_PACING_FACTOR,
+            #[cfg(test)]
+            force_leak_count: 0,
         }
     }
 }
@@ -807,9 +819,13 @@ impl State {
     fn create_buffer_list(&mut self, bwe: &super::BandwidthEstimator) -> BufferList {
         let now = now();
         let elapsed = Duration::try_from(now - self.last_push).unwrap();
+        // The pacer drains at pacing_factor * estimated_bitrate rather than
+        // at estimated_bitrate itself; with the default factor of 1.0 this
+        // is exactly the estimated bitrate, unchanged from before.
+        let pacing_bitrate = self.estimated_bitrate as f64 * self.pacing_factor;
         let mut budget = (elapsed.whole_nanoseconds() as i64)
             .mul_div_round(
-                self.estimated_bitrate as i64,
+                pacing_bitrate as i64,
                 gst::ClockTime::SECOND.nseconds() as i64,
             )
             .unwrap()
@@ -821,8 +837,8 @@ impl State {
         let mut list_size = 0;
         let mut list = BufferList::new();
 
-        // Leak the bucket so it can hold at most 30ms of data
-        let maximum_remaining_bits = 30. * self.estimated_bitrate as f64 / 1000.;
+        // Leak the bucket so it can hold at most 30ms of data at the pacing rate
+        let maximum_remaining_bits = 30. * pacing_bitrate / 1000.;
         let mut leaked = false;
         while (budget > 0 || remaining > maximum_remaining_bits) && !self.buffers.is_empty() {
             let buf = self.buffers.pop_back().unwrap();
@@ -850,6 +866,10 @@ impl State {
 
         self.last_push = now;
         self.budget_offset = if !leaked { budget } else { 0 };
+        #[cfg(test)]
+        if leaked {
+            self.force_leak_count += 1;
+        }
 
         list
     }
@@ -1365,6 +1385,21 @@ impl ObjectImpl for BandwidthEstimator {
                     .blurb("How to calculate the delay estimate that will be compared against the dynamic delay threshold.")
                     .mutable_ready()
                     .build(),
+                /*
+                 *  gcc:pacing-factor:
+                 *
+                 * The multiple of the estimated bitrate at which the internal
+                 * pacer drains its buffer. libwebrtc's default pace multiplier
+                 * is 2.5.
+                 */
+                glib::ParamSpecDouble::builder("pacing-factor")
+                    .nick("Pacing Factor")
+                    .blurb("Multiple of the estimated bitrate at which the internal pacer drains (libwebrtc's default pace multiplier is 2.5)")
+                    .minimum(1.0)
+                    .maximum(10.0)
+                    .default_value(DEFAULT_PACING_FACTOR)
+                    .mutable_playing()
+                    .build(),
             ]
         });
 
@@ -1441,6 +1476,10 @@ impl ObjectImpl for BandwidthEstimator {
                 state.estimator = value.get().unwrap();
                 state.detector.estimator_impl = state.estimator.to_impl()
             }
+            "pacing-factor" => {
+                let mut state = self.state.lock().unwrap();
+                state.pacing_factor = value.get::<f64>().expect("type checked upstream");
+            }
             _ => unimplemented!(),
         }
     }
@@ -1462,6 +1501,10 @@ impl ObjectImpl for BandwidthEstimator {
             "estimator" => {
                 let state = self.state.lock().unwrap();
                 state.estimator.to_value()
+            }
+            "pacing-factor" => {
+                let state = self.state.lock().unwrap();
+                state.pacing_factor.to_value()
             }
             _ => unimplemented!(),
         }
