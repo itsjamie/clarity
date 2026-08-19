@@ -771,12 +771,20 @@ mod scenarios {
         }
     }
 
-    /// The link gets its capacity back. The estimate creeps additively while
-    /// it is inside the band the element remembers the old capacity in, ramps
-    /// multiplicatively once it is out of it, and reaches the new capacity
-    /// well inside 30s without oscillating back down.
+    /// The link gets its capacity back. Two demonstrations rediscover it:
+    /// the backlog built against the old capacity drains at the new line
+    /// rate, and busy content keeps bursting into the encoder's 1.5x VBR
+    /// peak headroom (what `wire_gcc_bwe`'s max_kbps exists for). Both are
+    /// received without overuse, both exceed the target, and the element
+    /// adopts them instead of creeping: the restored 5Mbps is rediscovered
+    /// in well under three seconds (the creep needed ~18) and the estimate
+    /// stays on the link it recovered onto. An encoder pinned exactly at
+    /// the target would still be limited to the 1.08^t creep, since nothing
+    /// above the target is ever sent to be measured; the remembered band
+    /// gates exactly those evidence-free increases, which the LinkCapacity
+    /// unit tests pin.
     #[test]
-    fn capacity_step_up_recovers_through_the_remembered_band() {
+    fn capacity_step_up_adopts_the_restored_link() {
         let mut rig = TestRig::new(stepping_scenario(2_000_000));
 
         rig.run_for(Duration::seconds(8), busy);
@@ -791,45 +799,21 @@ mod scenarios {
 
         rig.set_capacity(5_000_000);
         let step = rig.trajectory().len();
-        rig.run_for(Duration::seconds(30), busy);
+        rig.run_for(Duration::seconds(10), |_, estimate| {
+            (u64::from(estimate) * 14 / 10).min(4_000_000)
+        });
         let recovery = &rig.trajectory()[step..];
 
-        let width = high - low;
         let step_at = recovery[0].0;
-        let time_at = |target: Bitrate| {
-            recovery
-                .iter()
-                .find(|(_, estimate)| *estimate >= target)
-                .map(|(elapsed, _)| *elapsed - step_at)
-        };
-        let in_band = FEEDBACK_INTERVAL
-            * recovery
-                .iter()
-                .filter(|(_, estimate)| (low..high).contains(estimate))
-                .count() as u32;
-        // The first `width` of estimate above the band is the one the
-        // capacity memory is dropped during, so measure the multiplicative
-        // ramp over the one after it.
-        let above_band = time_at(high + 2 * width).expect("recovery should pass the band")
-            - time_at(high + width).expect("recovery should pass the band");
-
+        let recovered = recovery
+            .iter()
+            .find(|(_, estimate)| *estimate >= 4_000_000)
+            .map(|(elapsed, _)| *elapsed - step_at)
+            .expect("the estimate should recover onto the 5Mbps link");
         assert!(
-            in_band > Duration::seconds(2),
-            "the estimate should creep additively while it is inside the \
-             remembered band, crossed its {width}bps in {in_band}"
-        );
-        assert!(
-            above_band * 2 < in_band,
-            "the estimate should ramp multiplicatively once past the \
-             remembered band: {width}bps took {above_band} there against \
-             {in_band} inside the band"
-        );
-
-        let recovered =
-            time_at(4_000_000).expect("the estimate should recover onto the 5Mbps link");
-        assert!(
-            recovered < Duration::seconds(25),
-            "recovery onto the 5Mbps link took {recovered}"
+            recovered < Duration::seconds(3),
+            "adopting the drained backlog's measured rate should rediscover \
+             the restored link in a couple of seconds, took {recovered}"
         );
         let after_recovery = recovery
             .iter()
@@ -1308,4 +1292,105 @@ mod scenarios {
         let leaks = imp.state.lock().unwrap().force_leak_count;
         (leaks, drained_bits_total, offered_bits_total)
     }
+    /// Recovery from a collapsed estimate at the speed the link allows, not
+    /// at 1.08^t. The encoder's VBR peak is 1.5x its target, so busy content
+    /// bursts above the current belief; those bytes arrive on a clean link
+    /// without overuse, and each feedback batch adopts the demonstrated rate
+    /// instead of creeping toward it. Crossing 800kbps to ~4Mbps takes tens
+    /// of seconds at 8%/s; adopted, it takes well under two seconds.
+    #[test]
+    fn recovery_adopts_the_demonstrated_rate() {
+        let mut rig = TestRig::new(ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps: 5_000_000,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: None,
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1200,
+            },
+            // Where a decrease sequence left the estimate.
+            start_bitrate: 800_000,
+            min_bitrate: 100_000,
+            max_bitrate: 8_192_000,
+        });
+
+        // Busy content, bursting into the encoder's 1.5x peak headroom the
+        // way a VBR encoder does, capped by what the content itself yields.
+        // Adoption starts one received-window after the last decrease (a
+        // fresh element counts construction as one), so the first second is
+        // the ordinary creep; from there the demonstrated rate compounds.
+        rig.run_for(Duration::seconds(4), |_, estimate| {
+            (u64::from(estimate) * 14 / 10).min(4_000_000)
+        });
+
+        let engaged_at = rig
+            .trajectory()
+            .iter()
+            .find(|(_, estimate)| *estimate >= 1_300_000)
+            .map(|(elapsed, _)| *elapsed);
+        assert!(
+            engaged_at.is_some_and(|at| at <= Duration::milliseconds(1_500)),
+            "the first adoption should land promptly once the post-decrease \
+             quiet period ends, got {engaged_at:?}"
+        );
+        let recovered_at = rig
+            .trajectory()
+            .iter()
+            .find(|(_, estimate)| *estimate >= 3_500_000)
+            .map(|(elapsed, _)| *elapsed);
+        assert!(
+            recovered_at.is_some_and(|at| at <= Duration::seconds(4)),
+            "adopting demonstrated rates should recover 800kbps to 3.5Mbps \
+             in a couple of seconds (1.08^t alone needs ~20), got there at \
+             {recovered_at:?}; trajectory: {:?}",
+            rig.trajectory().iter().map(|(_, e)| *e).collect::<Vec<_>>()
+        );
+    }
+
+    /// A near-empty received-packet window measures an absurd rate (two
+    /// packets with near-identical arrivals divide by almost zero); it must
+    /// not be adopted as a demonstrated rate. This is the state the window
+    /// is in right after an application-limited exit cleared it.
+    #[test]
+    fn a_near_empty_window_is_not_adopted() {
+        let _lock = RIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        gst::init().unwrap();
+
+        let bwe = glib::Object::new::<crate::gcc::BandwidthEstimator>();
+        bwe.set_property("min-bitrate", 100_000u32);
+        bwe.set_property("max-bitrate", 8_192_000u32);
+
+        let start = clock::stream();
+        clock::advance_to(start + Duration::seconds(1));
+
+        let imp = bwe.imp();
+        let mut state = imp.state.lock().unwrap();
+        for i in 0..2i64 {
+            let departure = start + Duration::milliseconds(i);
+            state
+                .detector
+                .update_last_received_packets(super::super::Packet {
+                    departure,
+                    arrival: departure + Duration::microseconds(20),
+                    size: 1_200,
+                    seqnum: i as u64,
+                });
+        }
+        assert!(
+            state.detector.effective_bitrate() > 8_192_000,
+            "two near-simultaneous packets should measure absurdly high"
+        );
+
+        state.target_bitrate_on_delay = 1_000_000;
+        state.estimated_bitrate = 1_000_000;
+        state.last_increase_on_delay = None;
+        let rate = state.compute_increased_rate(&bwe).unwrap_or(1_000_000);
+        assert!(
+            rate <= 1_100_000,
+            "an absurd measurement over a near-empty window was adopted: {rate}"
+        );
+    }
+
 }

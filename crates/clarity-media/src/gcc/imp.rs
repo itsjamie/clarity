@@ -120,6 +120,15 @@ const SENT_RATE_WINDOW: Duration = Duration::milliseconds(500);
 // `RateStatistics::Rate` reports no rate under the same condition.
 const MIN_SENT_RATE_WINDOW: Duration = Duration::milliseconds(50);
 
+// Adopting a demonstrated rate: a received rate this far above the current
+// target is read as a deliberate burst (the encoder's VBR peak is allowed
+// above the target precisely so busy content can probe the link) rather
+// than measurement noise, and a received-packet window with fewer packets
+// than this is too empty to trust: a couple of packets with near-identical
+// arrivals measure as an absurd rate.
+const DEMONSTRATED_RATE_MARGIN: f64 = 1.05;
+const DEMONSTRATED_RATE_MIN_PACKETS: usize = 10;
+
 // The element is application limited when it sends less than
 // ALR_ENTER_RATIO of the bitrate it estimated, and stops being so once it
 // sends ALR_EXIT_RATIO of it again. The gap between the two is hysteresis:
@@ -1092,16 +1101,6 @@ impl State {
             }
         };
 
-        if effective_bitrate as f64 - target_bitrate > 5. * target_bitrate / 100. {
-            gst::info!(
-                CAT,
-                "Effective rate {} >> target bitrate {} - we should avoid that \
-                 as much as possible fine tuning the encoder",
-                human_kbits(effective_bitrate),
-                human_kbits(target_bitrate)
-            );
-        }
-
         self.last_increase_on_delay = Some(now);
 
         // The link is carrying more than the capacity we remember, so that
@@ -1116,6 +1115,38 @@ impl State {
                 human_kbits(effective_bitrate),
             );
             self.link_capacity.reset();
+        }
+
+        // A received rate above the target is a measurement, not an anomaly:
+        // these bytes arrived without tripping the overuse detector, so the
+        // link just carried that much. Adopt the demonstrated rate outright
+        // instead of creeping toward it at 1.08^t (which needs tens of
+        // seconds to cross a collapsed-to-ceiling gap the link has already
+        // been shown to support). This is what libwebrtc's probe results do,
+        // a successful probe cluster sets the estimate directly, with the
+        // burst of real content standing in for the probe.
+        // The window guard keeps a decrease from being undone by its own
+        // history: for up to PACKETS_RECEIVED_WINDOW after a decrease the
+        // window still holds throughput measured before it, which would
+        // otherwise read as a demonstration and snap the target right back.
+        if self.detector.last_received_packets.len() >= DEMONSTRATED_RATE_MIN_PACKETS
+            && effective_bitrate as f64 > target_bitrate * DEMONSTRATED_RATE_MARGIN
+            && now - self.last_decrease_on_delay > PACKETS_RECEIVED_WINDOW
+        {
+            // The measured packets arrived, so as long as the window itself
+            // is not lossy the loss controller's target has no basis to gate
+            // the estimate below the demonstrated rate either; without this
+            // it would trail the adoption at 5% per update interval.
+            if self.detector.loss_ratio() < LOSS_INCREASE_THRESHOLD {
+                self.target_bitrate_on_loss = self
+                    .target_bitrate_on_loss
+                    .max(effective_bitrate.min(self.max_bitrate));
+            }
+            self.last_control_op = BandwidthEstimationOp::Increase(format!(
+                "Adopting demonstrated rate ({})",
+                human_kbits(effective_bitrate)
+            ));
+            return Some(effective_bitrate);
         }
 
         // Around the capacity we know about, creep up additively; anywhere
