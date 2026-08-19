@@ -123,6 +123,20 @@ impl EstimatorImpl for LinearRegressionEstimator {
     fn measure(&self) -> Duration {
         self.measure
     }
+
+    fn expect_fast_rate_change(&mut self) {
+        // The slope is only meaningful over samples taken under the same
+        // conditions, so start the window over rather than let the old ones
+        // hold the slope down, the way libwebrtc replaces its
+        // `TrendlineEstimator` outright. The estimate goes with them: until
+        // the window is full again there is nothing to base it on, and a
+        // leftover value would keep signalling the conditions that are gone.
+        self.samples.clear();
+        self.accumulated_delay = Duration::ZERO;
+        self.smoothed_delay = Duration::ZERO;
+        self.measure = Duration::ZERO;
+        self.estimate = Duration::ZERO;
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +183,53 @@ mod tests {
             // Don't bother checking smoothed_delay. It's a bit awkward to
             // predict it.
         }
+    }
+
+    /// The slope is only meaningful over samples taken under the same
+    /// conditions, so widening starts the window over: nothing is estimated
+    /// again until it has refilled with measurements of the new conditions.
+    #[test]
+    fn expect_fast_rate_change_starts_the_window_over() {
+        let mut estimator = LinearRegressionEstimator::default();
+
+        let mut prev_group = PacketGroup {
+            packets: vec![],
+            departure: Duration::milliseconds(1000),
+            arrival: Some(Duration::milliseconds(1050)),
+        };
+        // Groups arriving further and further behind: a rising slope.
+        let mut rising = |estimator: &mut LinearRegressionEstimator, groups: usize| {
+            for _ in 0..groups {
+                let group = PacketGroup {
+                    packets: vec![],
+                    departure: prev_group.departure + Duration::milliseconds(100),
+                    arrival: Some(prev_group.arrival.unwrap() + Duration::milliseconds(110)),
+                };
+                estimator.update(&prev_group, &group);
+                prev_group = group;
+            }
+        };
+
+        rising(&mut estimator, DEFAULT_SAMPLES_MAX_LEN * 2);
+        assert!(
+            estimator.estimate() > Duration::ZERO,
+            "a rising delay should have produced an estimate to begin with"
+        );
+
+        estimator.expect_fast_rate_change();
+        assert_eq!(estimator.samples.len(), 0);
+        assert_eq!(estimator.accumulated_delay, Duration::ZERO);
+        assert_eq!(estimator.estimate(), Duration::ZERO);
+
+        // Still nothing to say until the window has refilled.
+        rising(&mut estimator, DEFAULT_SAMPLES_MAX_LEN - 1);
+        assert_eq!(estimator.estimate(), Duration::ZERO);
+
+        rising(&mut estimator, 1);
+        assert!(
+            estimator.estimate() > Duration::ZERO,
+            "the estimate should be back once the window is full again"
+        );
     }
 
     // Helper to create fake PacketGroups with the desired `inter_group_delay`

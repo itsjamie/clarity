@@ -71,4 +71,67 @@ impl EstimatorImpl for KalmanEstimator {
     fn measure(&self) -> Duration {
         self.measure
     }
+
+    fn expect_fast_rate_change(&mut self) {
+        // `estimate_error` is the system error covariance `e(i-1)`, which the
+        // gain is computed from: the larger it is, the more the next
+        // measurements weigh against the current estimate. Q is the state
+        // noise covariance. This is libwebrtc's
+        // `E_[1][1] += 10 * process_noise_[1]` from `OveruseEstimator::Update`,
+        // one state variable instead of two.
+        self.estimate_error += 10. * Q;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::PacketGroup;
+    use super::*;
+
+    /// Widening the covariance is what makes the filter believe the next
+    /// measurements over the estimate it settled on before.
+    #[test]
+    fn expect_fast_rate_change_weighs_the_next_measurement_higher() {
+        let mut settled = KalmanEstimator::default();
+        let (prev_group, quiet) = with_inter_group_delay(Duration::ZERO);
+        for _ in 0..50 {
+            settled.update(&prev_group, &quiet);
+        }
+
+        let mut widened = settled.clone();
+        widened.expect_fast_rate_change();
+
+        // The same delay variation, seen by both.
+        let (prev_group, delayed) = with_inter_group_delay(Duration::milliseconds(10));
+        settled.update(&prev_group, &delayed);
+        widened.update(&prev_group, &delayed);
+
+        assert!(
+            widened.estimate() > settled.estimate(),
+            "the widened filter should have moved further on the same \
+             measurement, moved {} against {}",
+            widened.estimate(),
+            settled.estimate(),
+        );
+    }
+
+    // Two groups whose delay variation is `inter_group_delay`. The absolute
+    // values do not matter: the estimator only reads the variation.
+    fn with_inter_group_delay(inter_group_delay: Duration) -> (PacketGroup, PacketGroup) {
+        let inter_departure_delay = Duration::milliseconds(100);
+
+        let prev_group = PacketGroup {
+            packets: vec![],
+            departure: Duration::milliseconds(1000),
+            arrival: Some(Duration::milliseconds(1050)),
+        };
+
+        let group = PacketGroup {
+            packets: vec![],
+            departure: prev_group.departure + inter_departure_delay,
+            arrival: Some(prev_group.arrival.unwrap() + inter_departure_delay + inter_group_delay),
+        };
+
+        (prev_group, group)
+    }
 }

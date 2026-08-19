@@ -22,7 +22,7 @@ use gstreamer as gst;
 
 use gst::{glib, prelude::*, subclass::prelude::*};
 use std::collections::VecDeque;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use time::Duration;
 
 use super::{Bitrate, dur2ts};
@@ -120,6 +120,7 @@ pub(crate) struct TestRig {
     next_frame: Duration,
     seqnum: u64,
     in_flight: VecDeque<InFlight>,
+    report_lost: bool,
 
     trajectory: Vec<(Duration, Bitrate)>,
 
@@ -175,6 +176,7 @@ impl TestRig {
             next_frame: epoch,
             seqnum: 0,
             in_flight: VecDeque::new(),
+            report_lost: false,
             trajectory: Vec::new(),
             _lock: lock,
         }
@@ -193,6 +195,38 @@ impl TestRig {
     /// The largest queueing (plus jitter) delay the link model produced.
     pub(crate) fn max_queue_delay(&self) -> Duration {
         self.max_queue_delay
+    }
+
+    /// Whether the delay based detector is reporting overuse right now. It
+    /// only moves when a packet arrives, so feedback that reports everything
+    /// lost leaves it where it was.
+    pub(crate) fn overusing(&self) -> bool {
+        self.bwe.imp().state.lock().unwrap().detector.usage == super::NetworkUsage::Over
+    }
+
+    /// From now on the feedback reports every packet as lost, the way a path
+    /// that drops everything it is handed would. Lost packets carry no
+    /// arrival timestamp, so they never enter the detector's received packet
+    /// window.
+    pub(crate) fn report_all_lost(&mut self, lost: bool) {
+        self.report_lost = lost;
+    }
+
+    /// Records every `notify::application-limited` from now on, as (elapsed,
+    /// new value) pairs.
+    pub(crate) fn watch_application_limited(&self) -> Arc<Mutex<Vec<(Duration, bool)>>> {
+        let seen: Arc<Mutex<Vec<(Duration, bool)>>> = Default::default();
+        let recorder = seen.clone();
+        let epoch = self.epoch;
+        self.bwe
+            .connect_notify(Some("application-limited"), move |bwe, _| {
+                recorder.lock().unwrap().push((
+                    clock::stream() - epoch,
+                    bwe.property::<bool>("application-limited"),
+                ));
+            });
+
+        seen
     }
 
     /// Runs the scenario for `duration` of synthetic time. `offered_rate` is
@@ -310,11 +344,15 @@ impl TestRig {
         {
             let p = self.in_flight.pop_front().unwrap();
             let s = gst::Structure::builder("RTPTWCCPacket")
-                .field("lost", false)
+                .field("lost", self.report_lost)
                 .field("seqnum", (p.seqnum & 0xffff) as u32)
                 .field("size", p.size as u32)
-                .field("local-ts", dur2ts(p.departure))
-                .field("remote-ts", dur2ts(p.arrival));
+                .field("local-ts", dur2ts(p.departure));
+            let s = if self.report_lost {
+                s
+            } else {
+                s.field("remote-ts", dur2ts(p.arrival))
+            };
             structures.push(s.build());
         }
 
@@ -417,21 +455,228 @@ mod scenarios {
     }
 
     /// A long application-limited period (tiny packets at ~200kbps on a
-    /// 5Mbps link, with occasional jitter pulses) drags the estimate toward
-    /// the floor: the first jitter-triggered overuse snaps it to 0.85x the
-    /// effective (application-limited) rate and the capped increase path
-    /// cannot climb back out. This characterizes the known-bad behaviour
-    /// in-element ALR detection is about to fix; the assertion documents the
-    /// baseline rather than blessing it.
+    /// 5Mbps link, with occasional jitter pulses) never decreases the
+    /// estimate. Baseline before the in-element ALR detection: this same
+    /// scenario used to end below 500kbps, because the first
+    /// jitter-triggered overuse snapped the estimate to 0.85x the effective
+    /// (application-limited) rate and the capped increase path could not
+    /// climb back out.
     #[test]
-    fn idle_application_limited_estimate_collapses() {
+    fn idle_application_limited_estimate_holds() {
         let trajectory = run_scenario(idle_scenario(), Duration::seconds(15), |_, _| 200_000);
 
-        let last = trajectory.last().unwrap().1;
+        let lowest = trajectory.iter().map(|(_, e)| *e).min().unwrap();
         assert!(
-            last < 500_000,
-            "the unmodified element is expected to collapse the idle \
-             estimate, got {last} from its 2048kbps start"
+            lowest >= 2_048_000,
+            "the estimate should never be decreased while application \
+             limited, dropped to {lowest} from its 2048kbps start"
+        );
+    }
+
+    /// Twenty seconds of near-idle traffic and then real content: within a
+    /// few feedback batches of leaving the application-limited region the
+    /// estimate has settled onto what the link carries, and it stays there.
+    ///
+    /// The estimate is above the link when content resumes, so it settles
+    /// through a delay based decrease, and that decrease is the one the
+    /// received packet window is reset for. Measured over the idle period
+    /// the window reports the ~150kbps of content there was rather than the
+    /// 1.5Mbps the link carries, which would snap the estimate an order of
+    /// magnitude below the link. Climbing back out of that at 1.08^t takes
+    /// some 30 seconds, 600 feedback batches.
+    #[test]
+    fn idle_then_busy_recovers_within_a_few_batches() {
+        let mut rig = TestRig::new(narrow_link_scenario());
+
+        rig.run_for(Duration::seconds(20), |_, _| 150_000);
+        let idle_end = rig.estimate();
+        assert!(
+            idle_end >= 2_000_000,
+            "the idle period should not have decreased the estimate, got {idle_end}"
+        );
+
+        // Content resumes, with the encoder targeting the estimate the way
+        // `rate.rs` does.
+        let busy_start = rig.trajectory().len();
+        rig.run_for(Duration::seconds(3), |_, estimate| u64::from(estimate));
+
+        // The link carries 1.5Mbps, and the bar is 80% of it.
+        const CAPACITY: Bitrate = 1_500_000;
+        const BATCHES: usize = 10;
+        let busy = &rig.trajectory()[busy_start..];
+        let on_the_link = |estimate: Bitrate| estimate >= CAPACITY / 5 * 4;
+
+        assert!(
+            busy.iter()
+                .take(BATCHES)
+                .any(|(_, estimate)| *estimate < idle_end && on_the_link(*estimate)),
+            "within {BATCHES} feedback batches of content resuming the \
+             estimate should have come off its idle value and onto the link, \
+             got {:?}",
+            busy.iter()
+                .take(BATCHES)
+                .map(|(_, e)| *e)
+                .collect::<Vec<_>>()
+        );
+        for (i, (elapsed, estimate)) in busy.iter().take(BATCHES).enumerate() {
+            // Anchored on the received packet window as it stood during the
+            // idle period, this decrease would have gone to 0.85 x ~150kbps
+            // instead, and climbing back out of that at 1.08^t takes some 30
+            // seconds, 600 feedback batches.
+            assert!(
+                on_the_link(*estimate),
+                "estimate fell to {estimate} at {elapsed}, {i} feedback \
+                 batches after content resumed"
+            );
+        }
+
+        // Past that the jitter pulses keep provoking decreases and the
+        // estimate sawtooths below the link, which is the element's ordinary
+        // response to a path that keeps adding delay, unchanged here.
+    }
+
+    /// Content resuming into a path that drops all of it: the feedback batch
+    /// that takes the element out of the application-limited region reports
+    /// every packet lost, so it puts nothing back into the received packet
+    /// window the exit just cleared, and the delay based decrease has no
+    /// measurement of the link to decrease onto. It holds, and the loss
+    /// controller does the backing off. Without the empty-window guard the
+    /// decrease adopted `0.85 x 0` and the estimate went from 2Mbps to the
+    /// 100kbps floor in that one batch, with only 1.08^t to climb back out.
+    #[test]
+    fn all_lost_batch_on_exit_does_not_collapse_the_estimate() {
+        let mut rig = TestRig::new(idle_scenario());
+
+        // Sit application limited until one of the scenario's jitter pulses
+        // has left the detector reporting overuse. That is the state the ALR
+        // guard suppresses the decrease for, and nothing moves it back while
+        // no packet arrives.
+        let mut idle = Duration::ZERO;
+        while idle < Duration::seconds(30)
+            && !(rig.bwe.property::<bool>("application-limited") && rig.overusing())
+        {
+            rig.run_for(FEEDBACK_INTERVAL, |_, _| 200_000);
+            idle += FEEDBACK_INTERVAL;
+        }
+        assert!(
+            rig.bwe.property::<bool>("application-limited") && rig.overusing(),
+            "expected an application-limited overuse to hold on the idle link"
+        );
+        let idle_end = rig.estimate();
+
+        // Content resumes at the estimate and none of it arrives, up to the
+        // batch that takes the element out of the application-limited region.
+        // That is the batch the collapse happened on: it clears the received
+        // packet window on the way out and the lost packets put nothing back.
+        rig.report_all_lost(true);
+        let mut burst = Duration::ZERO;
+        while burst < Duration::seconds(2) && rig.bwe.property::<bool>("application-limited") {
+            rig.run_for(FEEDBACK_INTERVAL, |_, estimate| u64::from(estimate));
+            burst += FEEDBACK_INTERVAL;
+        }
+        assert!(
+            !rig.bwe.property::<bool>("application-limited"),
+            "sending at the estimate should have left the application-limited \
+             region even with the feedback reporting it all lost"
+        );
+        assert!(
+            rig.overusing(),
+            "the detector should still be reporting the overuse it was in \
+             when content resumed: nothing arrived to move it"
+        );
+
+        // The loss controller halves the target at most every 200ms, so it
+        // alone cannot have taken the estimate below an eighth of where the
+        // idle period left it over this burst. The collapse being guarded
+        // against is the 100kbps floor, in one batch.
+        let after_exit = rig.estimate();
+        assert!(
+            after_exit >= idle_end / 8,
+            "an all-lost resume burst should back the estimate off through \
+             the loss controller, not collapse it: {after_exit} from \
+             {idle_end} over {burst}"
+        );
+
+        // And once packets arrive again it climbs back, which a delay based
+        // target sitting on the floor could not do: from there only the
+        // 1.08^t increase applies, some 30 seconds of it.
+        rig.report_all_lost(false);
+        rig.run_for(Duration::seconds(2), |_, estimate| u64::from(estimate));
+        let recovered = rig.estimate();
+        assert!(
+            recovered >= 400_000,
+            "the estimate should climb again once the path stops dropping \
+             everything, got {recovered}"
+        );
+    }
+
+    /// The overuse the `overuse_backs_off_below_offered_rate` scenario
+    /// creates is genuine congestion, not an application-limited sender: the
+    /// element never reports itself application limited there, so the
+    /// decreases that scenario asserts are taken exactly as before.
+    #[test]
+    fn congestion_while_busy_is_not_application_limited() {
+        let mut rig = TestRig::new(congested_scenario());
+        let transitions = rig.watch_application_limited();
+
+        rig.run_for(Duration::seconds(4), |_, _| 2_500_000);
+
+        assert_eq!(
+            *transitions.lock().unwrap(),
+            vec![],
+            "a sender offering more than the link carries is not application \
+             limited at any point"
+        );
+        let last = rig.trajectory().last().unwrap().1;
+        assert!(
+            last < 1_500_000,
+            "estimate should back off below the 2.5Mbps offered rate, got {last}"
+        );
+    }
+
+    /// `application-limited` follows the traffic: it goes up once the sender
+    /// has been offering ~200kbps against a multi-megabit estimate, and back
+    /// down once content resumes, without flapping in between.
+    #[test]
+    fn application_limited_property_follows_the_schedule() {
+        let mut rig = TestRig::new(idle_scenario());
+        let transitions = rig.watch_application_limited();
+
+        assert!(
+            !rig.bwe.property::<bool>("application-limited"),
+            "a sender that has not sent anything yet is not application limited"
+        );
+
+        rig.run_for(Duration::seconds(5), |_, _| 200_000);
+        assert!(
+            rig.bwe.property::<bool>("application-limited"),
+            "200kbps against a 2Mbps estimate is application limited"
+        );
+
+        rig.run_for(Duration::seconds(2), |_, estimate| u64::from(estimate));
+        assert!(
+            !rig.bwe.property::<bool>("application-limited"),
+            "a sender tracking the estimate is not application limited"
+        );
+
+        let transitions = transitions.lock().unwrap();
+        let values = transitions.iter().map(|(_, v)| *v).collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![true, false],
+            "expected one transition each way, got {transitions:?}"
+        );
+        assert!(
+            transitions[0].0 <= Duration::milliseconds(500),
+            "entering should take about the length of the sent-rate window, \
+             took {}",
+            transitions[0].0
+        );
+        assert!(
+            transitions[1].0 - Duration::seconds(5) <= Duration::milliseconds(500),
+            "leaving should take about the length of the sent-rate window, \
+             took {}",
+            transitions[1].0 - Duration::seconds(5)
         );
     }
 
@@ -478,6 +723,33 @@ mod scenarios {
         }
     }
 
+    /// The same shape of link, narrow enough that ordinary 1200 byte packets
+    /// take longer than `BURST_TIME` to serialize onto it. That keeps the
+    /// detector's packet grouping working once the link saturates: on a fast
+    /// link a saturating sender's packets arrive back to back, which the
+    /// pre-filter reads as one group that never ends (see the module docs).
+    fn narrow_link_scenario() -> ScenarioConfig {
+        ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps: 1_500_000,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: Some(JitterPulse {
+                    period: Duration::seconds(2),
+                    length: Duration::milliseconds(500),
+                    slope: 0.2,
+                }),
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1200,
+            },
+            start_bitrate: 2_000_000,
+            min_bitrate: 100_000,
+            // A ceiling the application would actually use, the way
+            // `wire_gcc_bwe` derives it from the configured one.
+            max_bitrate: 2_000_000,
+        }
+    }
 
     /// Writing `estimated-bitrate` while playing takes effect immediately
     /// and in range: the property getter, which is also what the pacer's

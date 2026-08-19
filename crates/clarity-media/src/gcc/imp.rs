@@ -97,6 +97,25 @@ const LOSS_INCREASE_FACTOR: f64 = 1.05;
 // Minimal duration between 2 updates on the lost based rate controller
 const DELAY_UPDATE_INTERVAL: Duration = Duration::milliseconds(100);
 
+// Window over which the rate the element actually sends at is measured, the
+// input to the application-limited region (ALR) detection below. Same order
+// as the window libwebrtc's `AlrDetector` measures the pacer's output over.
+const SENT_RATE_WINDOW: Duration = Duration::milliseconds(500);
+
+// Ignore the sent rate until the element has been running for at least this
+// long, so that the first feedback batches are not judged against a window
+// that is mostly empty because it predates the element. libwebrtc's
+// `RateStatistics::Rate` reports no rate under the same condition.
+const MIN_SENT_RATE_WINDOW: Duration = Duration::milliseconds(50);
+
+// The element is application limited when it sends less than
+// ALR_ENTER_RATIO of the bitrate it estimated, and stops being so once it
+// sends ALR_EXIT_RATIO of it again. The gap between the two is hysteresis:
+// an encoder's output swings from frame to frame, and a single quiet frame
+// must not flip the state.
+const ALR_ENTER_RATIO: f64 = 0.70;
+const ALR_EXIT_RATIO: f64 = 0.75;
+
 // All wall-clock reads inside the estimator go through `now()` (and the RTT
 // reference in `Detector::update_rtts`); in test builds they are redirected to
 // the manually advanced clock in `testing::clock` so scenarios can drive the
@@ -281,7 +300,17 @@ trait EstimatorImpl: Send {
 
     /// Get the most recent measurement used as input to the estimator.
     /// Typically this will be the most recent inter-group delay variation.
-    fn measure(&self) -> Duration;
+    fn measure(&self) -> Duration;    /// Widen the estimator's uncertainty because the measurements it has
+    /// been fed no longer describe the conditions it is about to see, so it
+    /// should move fast on the next few of them.
+    ///
+    /// libwebrtc does the same thing in two places. `OveruseEstimator::Update`
+    /// inflates the offset state's variance (`E_[1][1] += 10 *
+    /// process_noise_[1]`) whenever the network hypothesis changes, and
+    /// `DelayBasedBwe::IncomingPacketFeedbackVector` drops and rebuilds its
+    /// `TrendlineEstimator` when a stream has been quiet, rather than letting
+    /// the samples from before the silence set the slope.
+    fn expect_fast_rate_change(&mut self);
 }
 
 mod kalman_estimator;
@@ -775,6 +804,17 @@ struct State {
     // Multiple of estimated_bitrate at which the leaky bucket drains
     pacing_factor: f64,
 
+    /// Bytes handed to the srcpad by the pacer, with the time they left,
+    /// kept over SENT_RATE_WINDOW. Every buffer goes through the pacer, so
+    /// this is the rate the element is actually sending at.
+    sent_bytes: VecDeque<(Instant, usize)>,
+    /// When the counter above started, so that a window that predates the
+    /// element is not mistaken for an idle one.
+    sent_window_start: Instant,
+    /// Whether the element is sending less than the estimate allows, i.e.
+    /// the content, not the link, is what is limiting it.
+    application_limited: bool,
+
     /// Test instrumentation only: counts calls to `create_buffer_list` where
     /// the 30ms cap forced eviction beyond the normal drain budget. Read by
     /// the pacing-factor scenario test; has no effect on production builds.
@@ -808,6 +848,9 @@ impl Default for State {
             last_push: now(),
             budget_offset: 0,
             pacing_factor: DEFAULT_PACING_FACTOR,
+            sent_bytes: Default::default(),
+            sent_window_start: now(),
+            application_limited: false,
             #[cfg(test)]
             force_leak_count: 0,
         }
@@ -866,12 +909,103 @@ impl State {
 
         self.last_push = now;
         self.budget_offset = if !leaked { budget } else { 0 };
+        self.account_sent(now, list_size);
         #[cfg(test)]
         if leaked {
             self.force_leak_count += 1;
         }
 
         list
+    }
+
+    /// Records bytes leaving the element, and forgets the ones that fell out
+    /// of SENT_RATE_WINDOW. Called on every pacer run, including the ones
+    /// that send nothing, so the window empties out during silence.
+    fn account_sent(&mut self, now: Instant, bytes: usize) {
+        if bytes > 0 {
+            self.sent_bytes.push_back((now, bytes));
+        }
+
+        while let Some((ts, _)) = self.sent_bytes.front() {
+            if now.duration_since(*ts) <= SENT_RATE_WINDOW {
+                break;
+            }
+            self.sent_bytes.pop_front();
+        }
+    }
+
+    /// The rate the element sent at over the last SENT_RATE_WINDOW, in
+    /// bit/sec, or `None` while the window is too young to say.
+    fn sent_bitrate(&self, now: Instant) -> Option<f64> {
+        let window = Duration::try_from(now - self.sent_window_start)
+            .unwrap()
+            .min(SENT_RATE_WINDOW);
+        if window < MIN_SENT_RATE_WINDOW {
+            return None;
+        }
+
+        let bits = self
+            .sent_bytes
+            .iter()
+            .filter(|(ts, _)| now.duration_since(*ts) <= SENT_RATE_WINDOW)
+            .map(|(_, bytes)| *bytes as f64)
+            .sum::<f64>()
+            * 8.;
+
+        Some(bits / window.as_seconds_f64())
+    }
+
+    /// Recomputes whether the element is application limited, on each batch
+    /// of feedback, which is the cadence the rate controllers run at.
+    /// Returns whether that changed, leaving it to the caller to notify
+    /// about it once it has let go of the state lock.
+    fn update_application_limited(&mut self, bwe: &super::BandwidthEstimator) -> bool {
+        let Some(sent_bitrate) = self.sent_bitrate(now()) else {
+            return false;
+        };
+
+        let target = self.estimated_bitrate as f64;
+        let limited = if self.application_limited {
+            sent_bitrate < ALR_EXIT_RATIO * target
+        } else {
+            sent_bitrate < ALR_ENTER_RATIO * target
+        };
+
+        if limited == self.application_limited {
+            return false;
+        }
+
+        gst::info!(
+            CAT,
+            obj = bwe,
+            "{} the application-limited region: sending {}ps of the {}ps estimated",
+            if limited { "Entering" } else { "Leaving" },
+            human_kbits(sent_bitrate),
+            human_kbits(target),
+        );
+
+        self.application_limited = limited;
+        if !limited {
+            self.leave_application_limited();
+        }
+
+        true
+    }
+
+    /// Drops what the element learned while it had nothing to send.
+    fn leave_application_limited(&mut self) {
+        // The received packets in the window all come from the
+        // application-limited period, so `effective_bitrate()` measures how
+        // little content there was rather than what the link can carry. Left
+        // in place it would anchor the first decrease taken after the exit
+        // to that rate, which is exactly the collapse this is here to avoid.
+        self.detector.last_received_packets.clear();
+
+        // Same reasoning for the delay estimate: the delay variations
+        // measured over sparse traffic say little about the link that is
+        // about to carry real content, so widen the estimator's uncertainty
+        // and let the fresh measurements move it.
+        self.detector.estimator_impl.expect_fast_rate_change();
     }
 
     fn compute_increased_rate(&mut self, bwe: &super::BandwidthEstimator) -> Option<Bitrate> {
@@ -1083,18 +1217,59 @@ impl State {
             },
             NetworkUsage::Over => {
                 let now = now();
-                if now - self.last_decrease_on_delay > DELAY_UPDATE_INTERVAL {
+                if self.application_limited {
+                    // The decrease below would take the target down to a
+                    // multiple of the effective bitrate, but while we are
+                    // application limited that is the rate of the content we
+                    // happen to have, not the rate the link would carry.
+                    // Adopting it here is what turns a quiet moment into a
+                    // collapsed estimate that then takes 1.08^t to climb back
+                    // out of. Hold the target instead. Loss based decreases
+                    // (`loss_control`) are untouched: packets that were sent
+                    // and did not arrive say something about the link no
+                    // matter how little we sent.
+                    gst::debug!(
+                        CAT,
+                        obj = bwe,
+                        "Over use detected while application limited, holding \
+                         the target at {}ps: {:#?}",
+                        human_kbits(self.estimated_bitrate),
+                        self.detector,
+                    );
+                } else if now - self.last_decrease_on_delay > DELAY_UPDATE_INTERVAL {
                     let effective_bitrate = self.detector.effective_bitrate();
-                    let target =
-                        (self.estimated_bitrate as f64 * 0.95).min(BETA * effective_bitrate as f64);
-                    self.last_control_op = BandwidthEstimationOp::Decrease(format!(
-                        "Over use detected {:#?}",
-                        self.detector
-                    ));
-                    self.ema.update(effective_bitrate);
-                    self.last_decrease_on_delay = now;
+                    if effective_bitrate == 0 {
+                        // Nothing has arrived since the received packet
+                        // window was last emptied, so there is no measurement
+                        // of what the link carries to decrease onto: the
+                        // target below would be `0.85 x 0`, which is the
+                        // minimum bitrate after clamping, and the same 0
+                        // would go into `link_capacity`. That window is empty
+                        // right after leaving the application-limited region
+                        // if the feedback that took us out reported every
+                        // packet lost, which is what a resume burst into a
+                        // path that cannot take it looks like. Hold, and
+                        // leave the loss controller to act on the loss.
+                        gst::debug!(
+                            CAT,
+                            obj = bwe,
+                            "Over use detected with no received packets to \
+                             measure, holding the target at {}ps: {:#?}",
+                            human_kbits(self.estimated_bitrate),
+                            self.detector,
+                        );
+                    } else {
+                        let target = (self.estimated_bitrate as f64 * 0.95)
+                            .min(BETA * effective_bitrate as f64);
+                        self.last_control_op = BandwidthEstimationOp::Decrease(format!(
+                            "Over use detected {:#?}",
+                            self.detector
+                        ));
+                        self.ema.update(effective_bitrate);
+                        self.last_decrease_on_delay = now;
 
-                    return self.set_bitrate(bwe, target as Bitrate, ControllerType::Delay);
+                        return self.set_bitrate(bwe, target as Bitrate, ControllerType::Delay);
+                    }
                 }
             }
             NetworkUsage::Under => {
@@ -1205,7 +1380,13 @@ impl BandwidthEstimator {
     ) -> Result<(), gst::LoggableError> {
         if let gst::PadMode::Push = mode {
             if active {
-                self.state.lock().unwrap().flow_return = Ok(gst::FlowSuccess::Ok);
+                let mut state = self.state.lock().unwrap();
+                state.flow_return = Ok(gst::FlowSuccess::Ok);
+                // Nothing was sent before now, so measure the sent rate from
+                // here rather than from whenever the element was built.
+                state.sent_bytes.clear();
+                state.sent_window_start = now();
+                drop(state);
                 self.start_task(bwe)?;
             } else {
                 let mut state = self.state.lock().unwrap();
@@ -1272,8 +1453,16 @@ impl ObjectSubclass for BandwidthEstimator {
                                 if !packets.is_empty() {
                                     let mut logged_bitrates = None;
 
-                                    let bitrate_changed = {
+                                    let (bitrate_changed, application_limited_changed) = {
                                         let mut state = this.state.lock().unwrap();
+
+                                        // Before folding this batch in: leaving
+                                        // the application-limited region drops
+                                        // the received packet window, and these
+                                        // packets are the first ones that
+                                        // describe the link again.
+                                        let application_limited_changed =
+                                            state.update_application_limited(&bwe);
 
                                         state.detector.update(&mut packets);
                                         let bitrate_updated_by_delay = state.delay_control(&bwe);
@@ -1288,7 +1477,7 @@ impl ObjectSubclass for BandwidthEstimator {
                                             ));
                                         }
 
-                                        bitrate_changed
+                                        (bitrate_changed, application_limited_changed)
                                     };
 
                                     if let Some(bitrates) = logged_bitrates {
@@ -1299,6 +1488,12 @@ impl ObjectSubclass for BandwidthEstimator {
                                             human_kbits(bitrates.0),
                                             human_kbits(bitrates.1),
                                         );
+                                    }
+
+                                    // The state lock is released by now, so
+                                    // neither notify runs under it.
+                                    if application_limited_changed {
+                                        bwe.notify("application-limited")
                                     }
 
                                     if bitrate_changed {
@@ -1399,6 +1594,22 @@ impl ObjectImpl for BandwidthEstimator {
                     .maximum(10.0)
                     .default_value(DEFAULT_PACING_FACTOR)
                     .mutable_playing()
+                    .build(),
+                /*
+                 *  gcc:application-limited:
+                 *
+                 * Whether the element is currently sending less than its
+                 * estimate allows, because the application has little to
+                 * send. While that is the case the delay based controller
+                 * holds its target instead of decreasing it, as the delay
+                 * measurements describe the absent content rather than the
+                 * link.
+                 */
+                glib::ParamSpecBoolean::builder("application-limited")
+                    .nick("Application Limited")
+                    .blurb("Whether the element is sending less than the estimated bitrate allows, in which case delay based decreases are held")
+                    .default_value(false)
+                    .read_only()
                     .build(),
             ]
         });
@@ -1505,6 +1716,10 @@ impl ObjectImpl for BandwidthEstimator {
             "pacing-factor" => {
                 let state = self.state.lock().unwrap();
                 state.pacing_factor.to_value()
+            }
+            "application-limited" => {
+                let state = self.state.lock().unwrap();
+                state.application_limited.to_value()
             }
             _ => unimplemented!(),
         }

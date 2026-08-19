@@ -56,6 +56,10 @@ impl Samples {
         if denum != 0. { Some(num / denum) } else { None }
     }
 
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
     pub fn push(&mut self, sample: Sample) {
         if self.samples.len() == self.max_len {
             self.samples.pop_back();
