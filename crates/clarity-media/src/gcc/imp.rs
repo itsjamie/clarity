@@ -67,6 +67,16 @@ const BETA: f64 = 0.85;
 // covers multiple occasions at which we are in the Decrease state.
 const MOVING_AVERAGE_SMOOTHING_FACTOR: f64 = 0.5;
 
+// The variance of the link capacity estimate is kept normalized by the
+// estimate itself and expressed in kbit/s, then clamped, exactly as
+// libwebrtc's `LinkCapacityEstimator::Update` does. The floor is what makes
+// the closeness range usable: with the plain variance of the samples a single
+// sample has a standard deviation of 0, so `avg - 3*sigma .. avg + 3*sigma`
+// is the empty range and nothing is ever close to the capacity we know about.
+// 0.4 ~= 14 kbit/s at 500 kbit/s, 2.5 ~= 35 kbit/s at 500 kbit/s.
+const MIN_LINK_CAPACITY_DEVIATION: f64 = 0.4;
+const MAX_LINK_CAPACITY_DEVIATION: f64 = 2.5;
+
 // `N(i)` is the number of packets received the past T seconds and `L(j)` is
 // the payload size of packet j.  A window between 0.5 and 1 second is
 // RECOMMENDED.
@@ -96,6 +106,8 @@ const LOSS_INCREASE_FACTOR: f64 = 1.05;
 
 // Minimal duration between 2 updates on the lost based rate controller
 const DELAY_UPDATE_INTERVAL: Duration = Duration::milliseconds(100);
+
+const ROUND_TRIP_TIME_WINDOW_SIZE: usize = 100;
 
 // Window over which the rate the element actually sends at is measured, the
 // input to the application-limited region (ALR) detection below. Same order
@@ -130,8 +142,6 @@ fn now() -> Instant {
         Instant::now()
     }
 }
-
-const ROUND_TRIP_TIME_WINDOW_SIZE: usize = 100;
 
 const fn ts2dur(t: gst::ClockTime) -> Duration {
     Duration::nanoseconds(t.nseconds() as i64)
@@ -300,7 +310,9 @@ trait EstimatorImpl: Send {
 
     /// Get the most recent measurement used as input to the estimator.
     /// Typically this will be the most recent inter-group delay variation.
-    fn measure(&self) -> Duration;    /// Widen the estimator's uncertainty because the measurements it has
+    fn measure(&self) -> Duration;
+
+    /// Widen the estimator's uncertainty because the measurements it has
     /// been fed no longer describe the conditions it is about to see, so it
     /// should move fast on the next few of them.
     ///
@@ -731,33 +743,88 @@ impl Detector {
     }
 }
 
+/// What the link was measured to carry, as an exponential moving average of
+/// the effective bitrate sampled whenever the delay based controller
+/// decreases, plus the spread of those samples. The band it defines is what
+/// tells "we are around the capacity we know about", where the rate control
+/// creeps up additively, from "we are nowhere near it", where it ramps
+/// multiplicatively to find the capacity again.
+///
+/// Ported from libwebrtc's `LinkCapacityEstimator`, which `AimdRateControl`
+/// uses for the same decision, with two deliberate divergences: the smoothing
+/// factor stays the one this element already used for the average (0.5, from
+/// section 5.5 of the spec) rather than libwebrtc's 0.05, and samples taken
+/// from probes are not a thing here, so the only input is an overuse.
 #[derive(Default, Debug)]
-struct ExponentialMovingAverage {
+struct LinkCapacity {
+    /// The average of the samples, in bit/s.
     average: Option<f64>,
-    variance: f64,
-    standard_dev: f64,
+    /// The variance of `average`, normalized by it and expressed in kbit/s so
+    /// that the clamp above is meaningful whatever the bitrate.
+    normalized_variance: f64,
 }
 
-impl ExponentialMovingAverage {
+impl LinkCapacity {
     fn update<T: Into<f64>>(&mut self, value: T) {
-        if let Some(avg) = self.average {
-            let avg_diff = value.into() - avg;
+        let sample = value.into();
+        let average = match self.average {
+            Some(avg) => avg + MOVING_AVERAGE_SMOOTHING_FACTOR * (sample - avg),
+            None => sample,
+        };
+        self.average = Some(average);
 
-            self.variance = (1. - MOVING_AVERAGE_SMOOTHING_FACTOR)
-                * (self.variance + MOVING_AVERAGE_SMOOTHING_FACTOR * avg_diff * avg_diff);
-            self.standard_dev = self.variance.sqrt();
-
-            self.average = Some(avg + (MOVING_AVERAGE_SMOOTHING_FACTOR * avg_diff));
-        } else {
-            self.average = Some(value.into());
-        }
+        let error_kbits = (average - sample) / 1000.;
+        let norm = f64::max(average / 1000., 1.);
+        self.normalized_variance = ((1. - MOVING_AVERAGE_SMOOTHING_FACTOR)
+            * self.normalized_variance
+            + MOVING_AVERAGE_SMOOTHING_FACTOR * error_kbits * error_kbits / norm)
+            .clamp(MIN_LINK_CAPACITY_DEVIATION, MAX_LINK_CAPACITY_DEVIATION);
     }
 
-    fn estimate_is_close(&self, value: Bitrate) -> bool {
+    /// Forgets the capacity, so that the next sample is adopted as-is instead
+    /// of being smoothed against measurements the link has moved away from.
+    fn reset(&mut self) {
+        *self = Default::default();
+    }
+
+    /// Half the width of the band, in bit/s: "close" is defined by the spec
+    /// as three standard deviations around the average.
+    fn closeness(&self, average: f64) -> f64 {
+        STANDARD_DEVIATION_CLOSE_NUM * 1000. * (self.normalized_variance * average / 1000.).sqrt()
+    }
+
+    /// Whether `value` sits inside the band around the measured capacity.
+    /// Always false while nothing has been measured, which is what makes a
+    /// fresh element ramp up multiplicatively.
+    fn is_close(&self, value: Bitrate) -> bool {
         self.average.is_some_and(|avg| {
-            ((avg - STANDARD_DEVIATION_CLOSE_NUM * self.standard_dev)
-                ..(avg + STANDARD_DEVIATION_CLOSE_NUM * self.standard_dev))
-                .contains(&(value as f64))
+            let closeness = self.closeness(avg);
+            ((avg - closeness)..(avg + closeness)).contains(&(value as f64))
+        })
+    }
+
+    /// Whether `value` is above the band, i.e. the link carries more than
+    /// what we remember of it.
+    fn is_above(&self, value: Bitrate) -> bool {
+        self.average
+            .is_some_and(|avg| value as f64 > avg + self.closeness(avg))
+    }
+
+    /// Whether `value` is below the band, i.e. the link carries less than
+    /// what we remember of it.
+    fn is_below(&self, value: Bitrate) -> bool {
+        self.average
+            .is_some_and(|avg| (value as f64) < avg - self.closeness(avg))
+    }
+
+    #[cfg(test)]
+    fn band(&self) -> Option<(Bitrate, Bitrate)> {
+        self.average.map(|avg| {
+            let closeness = self.closeness(avg);
+            (
+                f64::max(avg - closeness, 0.) as Bitrate,
+                (avg + closeness) as Bitrate,
+            )
         })
     }
 }
@@ -783,9 +850,11 @@ struct State {
     last_increase_on_loss: Instant,
     last_decrease_on_loss: Instant,
 
-    /// Exponential moving average, updated when bitrate is
-    /// decreased
-    ema: ExponentialMovingAverage,
+    /// What the link has been measured to carry, updated when the bitrate is
+    /// decreased. Never fed from an application-limited period: the decrease
+    /// is held there (see `delay_control`), and the rate measured then is the
+    /// rate of the content we happened to have, not of the link.
+    link_capacity: LinkCapacity,
 
     last_control_op: BandwidthEstimationOp,
 
@@ -833,7 +902,7 @@ impl Default for State {
             target_bitrate_on_loss: DEFAULT_ESTIMATED_BITRATE,
             last_increase_on_loss: now(),
             last_decrease_on_loss: now(),
-            ema: Default::default(),
+            link_capacity: Default::default(),
             last_increase_on_delay: None,
             last_decrease_on_delay: now(),
             min_bitrate: DEFAULT_MIN_BITRATE,
@@ -1034,7 +1103,29 @@ impl State {
         }
 
         self.last_increase_on_delay = Some(now);
-        if self.ema.estimate_is_close(effective_bitrate) {
+
+        // The link is carrying more than the capacity we remember, so that
+        // memory describes a link we are not on any more: drop it and go
+        // discover the new one. libwebrtc resets on the same condition, in
+        // `AimdRateControl::ChangeBitrate`'s increase branch.
+        if self.link_capacity.is_above(effective_bitrate) {
+            gst::log!(
+                CAT,
+                obj = bwe,
+                "Effective bitrate {}ps is above the link capacity band, forgetting it",
+                human_kbits(effective_bitrate),
+            );
+            self.link_capacity.reset();
+        }
+
+        // Around the capacity we know about, creep up additively; anywhere
+        // else, ramp multiplicatively to find the capacity. libwebrtc makes
+        // this decision on whether it has a capacity estimate at all, having
+        // just reset it above when the measurements left the band; asking
+        // where the target sits in the band is the same decision, one step
+        // earlier, and it also keeps the memory of a capacity we are still
+        // climbing back up to after a decrease.
+        if self.link_capacity.is_close(self.target_bitrate_on_delay) {
             let bits_per_frame = target_bitrate / 30.;
             let packets_per_frame = f64::ceil(bits_per_frame / (1200. * 8.));
             let avg_packet_size_bits = bits_per_frame / packets_per_frame;
@@ -1064,8 +1155,6 @@ impl State {
         } else {
             let eta = 1.08_f64.powf(f64::min(time_since_last_update_ms / 1000., 1.0));
             let rate = eta * self.target_bitrate_on_delay as f64;
-
-            self.ema = Default::default();
 
             assert!(
                 rate >= self.target_bitrate_on_delay as f64,
@@ -1259,13 +1348,41 @@ impl State {
                             self.detector,
                         );
                     } else {
-                        let target = (self.estimated_bitrate as f64 * 0.95)
-                            .min(BETA * effective_bitrate as f64);
+                        // Back off onto a fraction of what the link was
+                        // measured to carry, and never higher than where we
+                        // already are: a decrease that raises the target is
+                        // not a decrease, and the measured rate can exceed
+                        // the target after a burst that followed an
+                        // application-limited period.
+                        //
+                        // The vendored element also took `0.95 *
+                        // estimated_bitrate` into that min, which turned
+                        // every overuse where the target sat far below the
+                        // measured rate into a 5% micro step: a series of
+                        // them ratchets the target down 5% at a time without
+                        // ever deciding anything about the link.
+                        let target = f64::min(
+                            self.estimated_bitrate as f64,
+                            BETA * effective_bitrate as f64,
+                        );
                         self.last_control_op = BandwidthEstimationOp::Decrease(format!(
                             "Over use detected {:#?}",
                             self.detector
                         ));
-                        self.ema.update(effective_bitrate);
+
+                        // The link is carrying far less than the capacity we
+                        // remember: that memory is stale, so drop it and let
+                        // the sample below become the estimate rather than
+                        // being averaged against a link we are not on any
+                        // more. Same condition as libwebrtc's decrease
+                        // branch, which resets "to allow an immediate update
+                        // in OnOveruseDetected".
+                        if self.link_capacity.is_below(effective_bitrate) {
+                            self.link_capacity.reset();
+                        }
+                        // Only ever sampled here, which the branch above
+                        // keeps out of the application-limited region.
+                        self.link_capacity.update(effective_bitrate);
                         self.last_decrease_on_delay = now;
 
                         return self.set_bitrate(bwe, target as Bitrate, ControllerType::Delay);
@@ -1387,6 +1504,7 @@ impl BandwidthEstimator {
                 state.sent_bytes.clear();
                 state.sent_window_start = now();
                 drop(state);
+
                 self.start_task(bwe)?;
             } else {
                 let mut state = self.state.lock().unwrap();
@@ -1671,10 +1789,12 @@ impl ObjectImpl for BandwidthEstimator {
                     state.last_decrease_on_delay = now();
                     state.last_increase_on_loss = now();
                     state.last_decrease_on_loss = now();
-                    // The write says nothing about the link: forget the
-                    // moving average of past decreases, the way a fresh
-                    // element starts out.
-                    state.ema = Default::default();
+                    // The write says nothing about the link, but the target it
+                    // sets is the one the increase path now judges against the
+                    // remembered band, and that band was measured around a
+                    // target the application has just overridden. Start the
+                    // capacity measurement over, the way a fresh element would.
+                    state.link_capacity.reset();
                 }
 
                 // `notify` is emitted automatically once this call returns
@@ -1779,8 +1899,57 @@ pub(crate) mod testing;
 mod tests {
     use gstreamer as gst;
 
-    use super::{Detector, Estimator, Packet};
+    use super::{Detector, Estimator, LinkCapacity, Packet};
     use time::Duration;
+
+    /// One sample is enough to define a band that contains something. The
+    /// plain variance of a single sample is 0, which makes `avg - 3*sigma ..
+    /// avg + 3*sigma` the empty range and leaves nothing ever close to the
+    /// capacity that was just measured; the normalized variance floor is what
+    /// keeps the range usable.
+    #[test]
+    fn a_single_sample_defines_a_usable_band() {
+        let mut capacity = LinkCapacity::default();
+        assert_eq!(capacity.band(), None, "nothing measured yet");
+        assert!(!capacity.is_close(2_000_000));
+
+        capacity.update(2_000_000u32);
+        let (low, high) = capacity.band().unwrap();
+        assert!(
+            low < 2_000_000 && 2_000_000 < high,
+            "the sample should sit inside its own band, got {low}..{high}"
+        );
+        assert!(capacity.is_close(2_000_000));
+        assert!(capacity.is_below(low - 1) && !capacity.is_close(low - 1));
+        assert!(capacity.is_above(high + 1) && !capacity.is_close(high + 1));
+
+        // Sampling the same capacity again keeps the band, rather than
+        // narrowing it onto the average and losing the closeness test.
+        capacity.update(2_000_000u32);
+        assert_eq!(capacity.band(), Some((low, high)));
+
+        capacity.reset();
+        assert_eq!(capacity.band(), None, "a reset link capacity is unknown");
+    }
+
+    /// The average follows the samples, so a link that settles at a new
+    /// capacity is remembered at that capacity.
+    #[test]
+    fn the_band_follows_the_samples() {
+        let mut capacity = LinkCapacity::default();
+        capacity.update(2_000_000u32);
+        for _ in 0..10 {
+            capacity.update(1_000_000u32);
+        }
+
+        let (low, high) = capacity.band().unwrap();
+        assert!(
+            capacity.is_close(1_000_000),
+            "the band should have moved onto the new capacity, got {low}..{high}"
+        );
+        assert!(!capacity.is_close(2_000_000));
+    }
+
     #[test]
     fn test_detector_ensure_no_leak() {
         gst::init().unwrap();

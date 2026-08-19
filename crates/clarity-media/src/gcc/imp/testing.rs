@@ -192,6 +192,19 @@ impl TestRig {
         &self.trajectory
     }
 
+    /// Changes what the bottleneck can carry from here on, the way a path
+    /// that gains or loses capacity mid-session does. Packets already in
+    /// flight keep the arrival times the old capacity gave them.
+    pub(crate) fn set_capacity(&mut self, capacity_bps: u64) {
+        self.link.capacity_bps = capacity_bps;
+    }
+
+    /// The band the element currently remembers the link's capacity in, or
+    /// `None` while it has measured no capacity at all.
+    pub(crate) fn link_capacity_band(&self) -> Option<(Bitrate, Bitrate)> {
+        self.bwe.imp().state.lock().unwrap().link_capacity.band()
+    }
+
     /// The largest queueing (plus jitter) delay the link model produced.
     pub(crate) fn max_queue_delay(&self) -> Duration {
         self.max_queue_delay
@@ -677,6 +690,283 @@ mod scenarios {
             "leaving should take about the length of the sent-rate window, \
              took {}",
             transitions[1].0 - Duration::seconds(5)
+        );
+    }
+
+    /// A clean link of a given capacity, carrying MTU-sized packets in
+    /// per-frame bursts: the shape a real screen share has once there is
+    /// something to send. Used by the AIMD scenarios, which change the
+    /// capacity under a running element.
+    fn stepping_scenario(capacity_bps: u64) -> ScenarioConfig {
+        ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: None,
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1500,
+            },
+            start_bitrate: 3_000_000,
+            min_bitrate: 100_000,
+            max_bitrate: 5_000_000,
+        }
+    }
+
+    /// What `rate.rs` asks of the element, offer exactly what was estimated,
+    /// under a 4Mbps encoder ceiling. The ceiling keeps the sender off a
+    /// standing queue on the 5Mbps side of the steps: at that capacity a
+    /// 1500 byte packet serializes in 2.4ms, and once the queue stands the
+    /// packets arrive that close together, which the pre-filter reads as one
+    /// group that never ends (see the module docs). Below the capacity the
+    /// queue drains between frames and the groups close on the frame gaps.
+    fn busy(_: Duration, estimate: Bitrate) -> u64 {
+        u64::from(estimate).min(4_000_000)
+    }
+
+    /// The window the estimate is expected to settle in on a 2Mbps link:
+    /// `BETA` of what the link carries, up to the link itself.
+    const ON_A_2MBPS_LINK: std::ops::RangeInclusive<Bitrate> = 1_600_000..=2_000_000;
+
+    /// The link loses more than half of its capacity under a busy sender.
+    /// The estimate settles onto what is left of it within a few seconds and
+    /// stays there, rather than stepping its way down 5% at a time: the
+    /// decrease adopts `BETA` x the rate the link is measured to carry, and
+    /// the ones that follow cannot take it any lower while the link keeps
+    /// carrying that much.
+    #[test]
+    fn capacity_step_down_settles_onto_the_new_link() {
+        let mut rig = TestRig::new(stepping_scenario(5_000_000));
+
+        rig.run_for(Duration::seconds(6), busy);
+        let before_step = rig.estimate();
+        assert!(
+            before_step >= 4_000_000,
+            "the estimate should have climbed onto the 5Mbps link first, got {before_step}"
+        );
+
+        rig.set_capacity(2_000_000);
+        let step = rig.trajectory().len();
+        rig.run_for(Duration::seconds(12), busy);
+
+        // Three seconds of feedback batches to settle in, and the rest of the
+        // run to show it stays.
+        const SETTLING_BATCHES: usize = 60;
+        let (settling, settled) = rig.trajectory()[step..].split_at(SETTLING_BATCHES);
+
+        assert!(
+            settling
+                .iter()
+                .any(|(_, estimate)| ON_A_2MBPS_LINK.contains(estimate)),
+            "the estimate should have come down onto the 2Mbps link within \
+             {SETTLING_BATCHES} feedback batches, got {:?}",
+            settling.iter().map(|(_, e)| *e).collect::<Vec<_>>()
+        );
+        for (elapsed, estimate) in settled {
+            assert!(
+                ON_A_2MBPS_LINK.contains(estimate),
+                "the estimate left the 2Mbps link at {elapsed}: {estimate}"
+            );
+        }
+    }
+
+    /// The link gets its capacity back. The estimate creeps additively while
+    /// it is inside the band the element remembers the old capacity in, ramps
+    /// multiplicatively once it is out of it, and reaches the new capacity
+    /// well inside 30s without oscillating back down.
+    #[test]
+    fn capacity_step_up_recovers_through_the_remembered_band() {
+        let mut rig = TestRig::new(stepping_scenario(2_000_000));
+
+        rig.run_for(Duration::seconds(8), busy);
+        let (low, high) = rig
+            .link_capacity_band()
+            .expect("decreases on the 2Mbps link should have measured its capacity");
+        assert!(
+            (1_800_000..=2_200_000).contains(&low) && (1_800_000..=2_200_000).contains(&high),
+            "the remembered band should sit around the 2Mbps the link \
+             carried, got {low}..{high}"
+        );
+
+        rig.set_capacity(5_000_000);
+        let step = rig.trajectory().len();
+        rig.run_for(Duration::seconds(30), busy);
+        let recovery = &rig.trajectory()[step..];
+
+        let width = high - low;
+        let step_at = recovery[0].0;
+        let time_at = |target: Bitrate| {
+            recovery
+                .iter()
+                .find(|(_, estimate)| *estimate >= target)
+                .map(|(elapsed, _)| *elapsed - step_at)
+        };
+        let in_band = FEEDBACK_INTERVAL
+            * recovery
+                .iter()
+                .filter(|(_, estimate)| (low..high).contains(estimate))
+                .count() as u32;
+        // The first `width` of estimate above the band is the one the
+        // capacity memory is dropped during, so measure the multiplicative
+        // ramp over the one after it.
+        let above_band = time_at(high + 2 * width).expect("recovery should pass the band")
+            - time_at(high + width).expect("recovery should pass the band");
+
+        assert!(
+            in_band > Duration::seconds(2),
+            "the estimate should creep additively while it is inside the \
+             remembered band, crossed its {width}bps in {in_band}"
+        );
+        assert!(
+            above_band * 2 < in_band,
+            "the estimate should ramp multiplicatively once past the \
+             remembered band: {width}bps took {above_band} there against \
+             {in_band} inside the band"
+        );
+
+        let recovered =
+            time_at(4_000_000).expect("the estimate should recover onto the 5Mbps link");
+        assert!(
+            recovered < Duration::seconds(25),
+            "recovery onto the 5Mbps link took {recovered}"
+        );
+        let after_recovery = recovery
+            .iter()
+            .skip_while(|(elapsed, _)| *elapsed - step_at < recovered)
+            .map(|(_, estimate)| *estimate)
+            .min()
+            .unwrap();
+        assert!(
+            after_recovery >= 3_000_000,
+            "the estimate should stay on the link it recovered onto, fell \
+             back to {after_recovery}"
+        );
+    }
+
+    /// The increase that follows a decrease does not undo it in a batch or
+    /// two: the target comes back up towards the capacity the element
+    /// remembers, not straight past it.
+    #[test]
+    fn the_increase_after_a_decrease_does_not_overshoot() {
+        let mut rig = TestRig::new(stepping_scenario(5_000_000));
+
+        // Settle onto a 2Mbps link, so that the decreases from here on are
+        // the ordinary ones taken against a capacity the element knows.
+        rig.run_for(Duration::seconds(6), busy);
+        rig.set_capacity(2_000_000);
+        rig.run_for(Duration::seconds(6), busy);
+
+        let settled = rig.trajectory().len();
+        rig.run_for(Duration::seconds(6), busy);
+
+        // The first decrease of the settled sawtooth, and the second worth of
+        // feedback batches that follows it.
+        let trajectory = &rig.trajectory()[settled..];
+        let decrease = trajectory
+            .windows(2)
+            .position(|w| w[1].1 < w[0].1)
+            .expect("the settled sawtooth should contain a decrease");
+        let before = trajectory[decrease].1;
+        let after = &trajectory[decrease + 1..];
+        assert!(
+            after[0].1 < before,
+            "expected a decrease from {before}, got {}",
+            after[0].1
+        );
+
+        const BATCHES: usize = 20;
+        for (elapsed, estimate) in after.iter().take(BATCHES) {
+            assert!(
+                *estimate <= before,
+                "the estimate was back above the {before} it was decreased \
+                 from at {elapsed}: {estimate}"
+            );
+        }
+    }
+
+    /// Nothing measured while the sender is application limited goes into the
+    /// link capacity: the rate it sends at then is the rate of the content it
+    /// happens to have, and remembering it as the link's capacity would leave
+    /// the increase creeping additively towards a rate the link never
+    /// imposed. The jitter pulses of this scenario do produce overuses, they
+    /// are just held rather than decreased on (see
+    /// `idle_application_limited_estimate_holds`).
+    #[test]
+    fn application_limited_traffic_never_measures_the_link() {
+        let mut rig = TestRig::new(idle_scenario());
+
+        rig.run_for(Duration::seconds(15), |_, _| 200_000);
+
+        assert!(
+            rig.bwe.property::<bool>("application-limited"),
+            "200kbps against a 2Mbps estimate is application limited"
+        );
+        assert_eq!(
+            rig.link_capacity_band(),
+            None,
+            "the link capacity should be unknown after a run that only ever \
+             sent ~200kbps of the ~5Mbps the link carries"
+        );
+    }
+
+    /// A decrease never raises the target. The loss controller can have the
+    /// estimate pinned well below what the link is measured to be carrying,
+    /// and `BETA` x that measurement is then above the target the delay
+    /// controller is decreasing from: adopting it would turn an overuse into
+    /// an increase.
+    #[test]
+    fn an_overuse_decrease_never_raises_the_target() {
+        let _lock = RIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        gst::init().unwrap();
+
+        let bwe = glib::Object::new::<crate::gcc::BandwidthEstimator>();
+        bwe.set_property("min-bitrate", 100_000u32);
+        bwe.set_property("max-bitrate", 8_192_000u32);
+
+        // Past the delay controller's update interval, so the decrease below
+        // is not gated on it.
+        let start = clock::stream();
+        clock::advance_to(start + Duration::seconds(1));
+
+        let imp = bwe.imp();
+        let mut state = imp.state.lock().unwrap();
+
+        // 20 packets of 2500 bytes over 190ms of arrivals, ~2.1Mbps of
+        // measured link.
+        for i in 0..20i64 {
+            let departure = start + Duration::milliseconds(10 * i);
+            state
+                .detector
+                .update_last_received_packets(super::super::Packet {
+                    departure,
+                    arrival: departure + Duration::milliseconds(20),
+                    size: 2_500,
+                    seqnum: i as u64,
+                });
+        }
+        let effective = state.detector.effective_bitrate();
+        assert!(
+            effective > 2_000_000,
+            "the window should measure the ~2.1Mbps it was fed, got {effective}"
+        );
+
+        // The loss controller has the estimate down at 500kbps while the
+        // delay controller's own target is still where it was.
+        state.estimated_bitrate = 500_000;
+        state.target_bitrate_on_loss = 500_000;
+        state.target_bitrate_on_delay = 3_000_000;
+        state.detector.usage = super::super::NetworkUsage::Over;
+
+        assert!(
+            !state.delay_control(&bwe),
+            "a decrease onto a rate above the estimate should leave it alone"
+        );
+        assert!(
+            state.target_bitrate_on_delay <= 500_000,
+            "the decrease raised the delay target to {} from the 500kbps \
+             estimate, on a link measured at {effective}",
+            state.target_bitrate_on_delay
         );
     }
 
