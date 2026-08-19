@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::capture::CaptureStream;
 use crate::ice::{IceEndpoints, ice_endpoints};
 use crate::playback::{ConnectionState, FrameSink, TWCC_EXTENSION_URI, frame_appsink};
-use crate::rate::{AdaptiveController, SendRateSampler};
+use crate::rate::{self, AdaptiveController, SendRateSampler};
 use crate::stats::{self, SenderStats, StatsBaseline};
 
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
@@ -2592,15 +2592,16 @@ fn narrow_codec_preferences(webrtc: &gst::Element, codec: VideoCodec, pt: u32) {
     }
 }
 
-/// Attaches GStreamer's GCC bandwidth estimator to this viewer's connection
-/// through webrtcbin's aux-sender hook and feeds its estimate through the
-/// application-limited-region controller. The transport-wide estimate has the
-/// fixed audio budget subtracted so congestion throttles video and never
-/// audio; the measured send rate comes from the video byte counter, so it
-/// needs no such correction. The controller holds the rate steady on an idle
-/// screen (where the raw estimate collapses) instead of chasing it down, and
-/// keeps holding through busy onset until the estimate has re-validated the
-/// held capacity. See [`crate::rate`].
+/// Attaches a GCC bandwidth estimator to this viewer's connection through
+/// webrtcbin's aux-sender hook. The transport-wide estimate has the fixed
+/// audio budget subtracted so congestion throttles video and never audio,
+/// then drives the encoder one of two ways. The vendored `claritygccbwe`
+/// detects the application-limited region itself and holds its estimate
+/// through idle periods, so its estimate is applied directly with VBR peak
+/// headroom. The stock `rtpgccbwe` fallback collapses its estimate while
+/// application limited, so it goes through the adaptive controller, fed a
+/// send-rate reading from the video byte counter (video only, so no audio
+/// correction). See [`crate::rate`].
 fn wire_gcc_bwe(
     webrtc: &gst::Element,
     rate_target: RateTarget,
@@ -2623,14 +2624,17 @@ fn wire_gcc_bwe(
         let Ok(bwe) = bwe else {
             return None;
         };
-        // Bounds and the starting estimate are only settable before the
-        // element is started, which is why they are configured here.
+        // The bounds are only settable before the element starts; so is the
+        // starting estimate on the stock element (the vendored one accepts
+        // live writes, unused here).
         bwe.set_property("min-bitrate", min_bps);
         bwe.set_property("max-bitrate", max_bps);
         bwe.set_property("estimated-bitrate", start_bps);
-        // Only the vendored element has this property; the stock `rtpgccbwe`
-        // fallback doesn't, so guard the set to avoid a panic there.
-        if bwe.find_property("pacing-factor").is_some() {
+        // The property doubles as the marker for which element was built:
+        // only the vendored one has it, and only the vendored one manages
+        // the application-limited region itself.
+        let vendored = bwe.find_property("pacing-factor").is_some();
+        if vendored {
             bwe.set_property("pacing-factor", 2.5f64);
         }
         let rate_target = Arc::clone(&rate_target);
@@ -2645,16 +2649,28 @@ fn wire_gcc_bwe(
         bwe.connect_notify(Some("estimated-bitrate"), move |bwe, _| {
             let estimate = bwe.property::<u32>("estimated-bitrate");
             let estimate_kbps = estimate.saturating_sub(audio_bps).max(VIDEO_MIN_KBPS * 1000) / 1000;
-            // The byte counter covers video only, so unlike the transport-wide
-            // estimate no audio budget needs subtracting here.
-            let actual_kbps = sampler
-                .lock()
-                .expect("send rate lock")
-                .sample(video_bytes_sent.load(Ordering::Relaxed), Instant::now());
-            let command = controller
-                .lock()
-                .expect("rate lock")
-                .on_estimate(estimate_kbps, actual_kbps);
+            let command = if vendored {
+                // The element holds its estimate through application-limited
+                // periods and re-measures on exit, so the estimate is current
+                // by construction; second-guessing it here would read its
+                // legitimate post-idle settle-down as congestion and back
+                // off on top of it.
+                rate::trust_estimate(estimate_kbps, VIDEO_MIN_KBPS, ceiling_kbps)
+            } else {
+                // The stock element's estimate collapses while application
+                // limited; the controller compensates, fed a send-rate
+                // reading fresh enough to catch busy/static transitions.
+                // The byte counter covers video only, so unlike the
+                // transport-wide estimate no audio budget is subtracted.
+                let actual_kbps = sampler
+                    .lock()
+                    .expect("send rate lock")
+                    .sample(video_bytes_sent.load(Ordering::Relaxed), Instant::now());
+                controller
+                    .lock()
+                    .expect("rate lock")
+                    .on_estimate(estimate_kbps, actual_kbps)
+            };
             // Indirect so the answer-driven codec pick (and any later swap)
             // redirects rate control to the encoder actually in use; before
             // the pick there is nothing to drive.
@@ -2664,8 +2680,8 @@ fn wire_gcc_bwe(
             target_kbps.store(command.target_kbps, Ordering::Relaxed);
             tracing::debug!(
                 estimate_kbps,
-                actual_kbps,
                 target_kbps = command.target_kbps,
+                vendored,
                 "gcc estimate"
             );
         });

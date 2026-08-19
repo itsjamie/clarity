@@ -1,5 +1,14 @@
-//! Sender-side adaptive rate control: an application-limited-region (ALR) aware
-//! wrapper over the congestion estimator, reproducing the core of how a browser
+//! Sender-side adaptive rate control.
+//!
+//! Two paths share this module. A viewer driven by the vendored
+//! `claritygccbwe` element trusts the estimate as-is ([`trust_estimate`]):
+//! that element detects the application-limited region itself, holds its
+//! target through idle periods, and re-measures the link on exit, so a
+//! wrapper second-guessing it would only fight it — most visibly by reading
+//! the legitimate settle-down decrease after an idle period as congestion
+//! and backing off on top of it. Everything below `trust_estimate` is the
+//! fallback for the stock `rtpgccbwe`: an application-limited-region (ALR)
+//! aware wrapper over the estimator, reproducing the core of how a browser
 //! sender keeps a screen share at a good bitrate.
 //!
 //! The Google congestion estimator ([`rtpgccbwe`]) cannot measure capacity above
@@ -19,9 +28,10 @@
 //! exposes no pacer to inject probe packets, and NVENC's VBR will not pad a
 //! static frame, so padding-based probing is not available here.)
 //!
-//! The estimator's absolute value goes stale while the sender is
+//! The stock estimator's absolute value goes stale while the sender is
 //! application-limited: its state cannot be corrected from outside
-//! (`estimated-bitrate` is only writable before the element starts), so after
+//! (`estimated-bitrate` is only writable before the stock element starts;
+//! the vendored one accepts live writes but does not need them), so after
 //! an idle period it reports a collapsed number and climbs back at only ~8%/s.
 //! Adopting that number on the first busy frame would crush the encoder
 //! exactly when the user starts doing something. The controller therefore
@@ -50,6 +60,20 @@ pub(crate) struct RateCommand {
     pub target_kbps: u32,
     /// The encoder's peak/max bitrate (the VBR cap), in kbps.
     pub max_kbps: u32,
+}
+
+/// The encoder rate for a viewer whose estimator manages the
+/// application-limited region itself (the vendored `claritygccbwe`): the
+/// estimate is current by construction, so it is applied directly, with the
+/// same VBR peak headroom the controller keeps so that real content can
+/// burst above the target and re-measure the link.
+pub(crate) fn trust_estimate(estimate_kbps: u32, floor_kbps: u32, ceiling_kbps: u32) -> RateCommand {
+    let ceiling_kbps = floor_kbps.max(ceiling_kbps);
+    let target_kbps = estimate_kbps.clamp(floor_kbps, ceiling_kbps);
+    RateCommand {
+        target_kbps,
+        max_kbps: frac(target_kbps, 3, 2).min(ceiling_kbps),
+    }
 }
 
 /// How much the estimator's absolute value is currently trusted.
@@ -326,6 +350,23 @@ mod tests {
         let mut ctl = AdaptiveController::new(600, 6_000, 4_500);
         let cmd = ctl.on_estimate(4_500, 4_400);
         assert_eq!(cmd.max_kbps, 6_000, "1.5x of 4_500 exceeds the ceiling");
+    }
+
+    // The vendored element's estimate is applied directly, with the same
+    // peak headroom the controller keeps.
+    #[test]
+    fn trusted_estimate_is_applied_with_peak_headroom() {
+        let cmd = trust_estimate(2_000, 600, 6_000);
+        assert_eq!(cmd.target_kbps, 2_000);
+        assert_eq!(cmd.max_kbps, 3_000);
+    }
+
+    #[test]
+    fn trusted_estimate_clamps_to_floor_and_ceiling() {
+        assert_eq!(trust_estimate(50, 600, 6_000).target_kbps, 600);
+        let cmd = trust_estimate(9_000, 600, 6_000);
+        assert_eq!(cmd.target_kbps, 6_000);
+        assert_eq!(cmd.max_kbps, 6_000, "headroom never exceeds the ceiling");
     }
 
     #[test]
