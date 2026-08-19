@@ -478,4 +478,175 @@ mod scenarios {
         }
     }
 
+
+    /// Writing `estimated-bitrate` while playing takes effect immediately
+    /// and in range: the property getter, which is also what the pacer's
+    /// leaky bucket reads for its drain rate, reflects the new value before
+    /// any further feedback is processed.
+    #[test]
+    fn live_write_applies_immediately_in_range() {
+        let mut rig = TestRig::new(ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps: 10_000_000,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: None,
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1200,
+            },
+            start_bitrate: 1_000_000,
+            min_bitrate: 200_000,
+            max_bitrate: 4_000_000,
+        });
+
+        // Not sampled at t=0: let a bit of real traffic go by first.
+        rig.run_for(Duration::milliseconds(500), |_, estimate| {
+            u64::from(estimate).min(3_000_000)
+        });
+
+        rig.bwe.set_property("estimated-bitrate", 3_500_000u32);
+        assert_eq!(
+            rig.estimate(),
+            3_500_000,
+            "an in-range live write should apply exactly and immediately"
+        );
+    }
+
+    /// A live write outside [min-bitrate, max-bitrate] clamps, both above
+    /// and below.
+    #[test]
+    fn live_write_clamps_to_min_and_max_bitrate() {
+        let rig = TestRig::new(ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps: 10_000_000,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: None,
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1200,
+            },
+            start_bitrate: 1_000_000,
+            min_bitrate: 200_000,
+            max_bitrate: 4_000_000,
+        });
+
+        rig.bwe.set_property("estimated-bitrate", 9_000_000u32);
+        assert_eq!(rig.estimate(), 4_000_000, "write above max-bitrate should clamp down to it");
+
+        rig.bwe.set_property("estimated-bitrate", 50_000u32);
+        assert_eq!(rig.estimate(), 200_000, "write below min-bitrate should clamp up to it");
+    }
+
+    /// `notify::estimated-bitrate` fires exactly once for a live write, and
+    /// carries the clamped value rather than the raw one that was set.
+    #[test]
+    fn live_write_notifies_with_clamped_value() {
+        let rig = TestRig::new(ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps: 10_000_000,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: None,
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1200,
+            },
+            start_bitrate: 1_000_000,
+            min_bitrate: 200_000,
+            max_bitrate: 4_000_000,
+        });
+
+        let seen: std::sync::Arc<Mutex<Vec<u32>>> = Default::default();
+        let seen_clone = seen.clone();
+        rig.bwe.connect_notify(Some("estimated-bitrate"), move |obj, _| {
+            seen_clone.lock().unwrap().push(obj.property::<u32>("estimated-bitrate"));
+        });
+
+        rig.bwe.set_property("estimated-bitrate", 9_000_000u32);
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![4_000_000],
+            "notify should fire once, carrying the clamped value"
+        );
+    }
+
+    /// A write before the element starts (state <= READY) keeps the
+    /// original behaviour: the value is stored as-is, without clamping to
+    /// [min-bitrate, max-bitrate]. This is `estimated-bitrate`'s documented
+    /// use for configuring the starting bitrate.
+    #[test]
+    fn pre_start_write_is_unclamped_like_before() {
+        gst::init().unwrap();
+        let bwe = glib::Object::new::<crate::gcc::BandwidthEstimator>();
+        bwe.set_property("min-bitrate", 200_000u32);
+        bwe.set_property("max-bitrate", 4_000_000u32);
+
+        assert!(bwe.current_state() <= gst::State::Ready);
+
+        bwe.set_property("estimated-bitrate", 9_000_000u32);
+        assert_eq!(
+            bwe.property::<u32>("estimated-bitrate"),
+            9_000_000,
+            "pre-start writes should not be clamped, same as before this change"
+        );
+    }
+
+    /// A live write that lands after a silent period (no in-flight packets,
+    /// so no feedback events, so the delay controller's bookkeeping
+    /// timestamps go stale while synthetic time keeps advancing under them)
+    /// must not compound with the controller's own multiplicative increase
+    /// on the next feedback batch. Without resetting `last_increase_on_delay`
+    /// at write time, the stale elapsed-time computation applies an extra
+    /// ~8% bump on top of the value that was just written, and the
+    /// resulting overshoot goes on to trigger a real overuse decrease.
+    #[test]
+    fn live_write_after_silence_does_not_double_increase() {
+        let mut rig = TestRig::new(ScenarioConfig {
+            link: LinkConfig {
+                capacity_bps: 10_000_000,
+                one_way_delay: Duration::milliseconds(20),
+                jitter: None,
+            },
+            traffic: TrafficConfig {
+                frame_interval: Duration::milliseconds(33),
+                packet_size: 1200,
+            },
+            start_bitrate: 500_000,
+            min_bitrate: 100_000,
+            max_bitrate: 8_192_000,
+        });
+
+        // Converge steadily, well below link capacity, no overuse: this is
+        // what leaves `last_control_op` in a state (`Increase`/`Hold`) that
+        // will make the delay controller call into the increase path again
+        // as soon as feedback resumes.
+        rig.run_for(Duration::seconds(3), |_, estimate| {
+            u64::from(estimate).min(600_000)
+        });
+
+        // Silence long enough that, without a reset, elapsed time since the
+        // delay controller's last update saturates the multiplicative
+        // increase's `eta` term (capped at 1s).
+        rig.run_for(Duration::milliseconds(1500), |_, _| 0);
+
+        rig.bwe.set_property("estimated-bitrate", 4_000_000u32);
+        assert_eq!(rig.estimate(), 4_000_000);
+
+        // Resume traffic tracking the new estimate.
+        let before_resume = rig.trajectory().len();
+        rig.run_for(Duration::milliseconds(200), |_, estimate| u64::from(estimate));
+
+        for (elapsed, estimate) in &rig.trajectory()[before_resume..] {
+            assert_eq!(
+                *estimate,
+                4_000_000,
+                "estimate drifted from the live write at {elapsed}: stale \
+                 controller bookkeeping re-applied a multiplicative increase \
+                 on top of it"
+            );
+        }
+    }
 }

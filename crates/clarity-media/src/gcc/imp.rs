@@ -1336,11 +1336,13 @@ impl ObjectImpl for BandwidthEstimator {
                     .nick("Estimated Bitrate")
                     .blurb("Currently estimated bitrate. Can be set before starting
                      the element to configure the starting bitrate, in which case the
-                     encoder should also use it as target bitrate")
+                     encoder should also use it as target bitrate. Can also be set
+                     while playing to steer the estimate, e.g. from an out-of-band
+                     signal; the value is clamped to [min-bitrate, max-bitrate].")
                     .minimum(1)
                     .maximum(u32::MAX)
                     .default_value(DEFAULT_MIN_BITRATE)
-                    .mutable_ready()
+                    .mutable_playing()
                     .build(),
                 glib::ParamSpecUInt::builder("min-bitrate")
                     .nick("Minimal Bitrate")
@@ -1380,11 +1382,59 @@ impl ObjectImpl for BandwidthEstimator {
                 state.max_bitrate = value.get::<u32>().expect("type checked upstream");
             }
             "estimated-bitrate" => {
-                let mut state = self.state.lock().unwrap();
                 let bitrate = value.get::<u32>().expect("type checked upstream");
-                state.target_bitrate_on_delay = bitrate;
-                state.target_bitrate_on_loss = bitrate;
-                state.estimated_bitrate = bitrate;
+                let mut state = self.state.lock().unwrap();
+
+                // Below READY the element hasn't started its pad/streaming
+                // thread yet, so there is no pacer or feedback loop whose
+                // bookkeeping could go stale: keep the original unclamped
+                // "set the starting bitrate" behaviour. From PAUSED onward
+                // this is a live retarget, so clamp it and reset the
+                // controllers' bookkeeping the same way a fresh element
+                // would start out.
+                if self.obj().current_state() <= gst::State::Ready {
+                    state.target_bitrate_on_delay = bitrate;
+                    state.target_bitrate_on_loss = bitrate;
+                    state.estimated_bitrate = bitrate;
+                } else {
+                    let (min_bitrate, max_bitrate) = if state.min_bitrate <= state.max_bitrate {
+                        (state.min_bitrate, state.max_bitrate)
+                    } else {
+                        (state.max_bitrate, state.max_bitrate)
+                    };
+                    let bitrate = bitrate.clamp(min_bitrate, max_bitrate);
+
+                    state.target_bitrate_on_delay = bitrate;
+                    state.target_bitrate_on_loss = bitrate;
+                    // Read by the pacer's leaky bucket on its next call, so
+                    // the drain rate reflects this write immediately.
+                    state.estimated_bitrate = bitrate;
+
+                    // This is an externally forced retarget, not the outcome
+                    // of the delay/loss controllers reacting to feedback:
+                    // reset their bookkeeping so the next feedback batch
+                    // judges the new value on its own merits, rather than
+                    // against timers left over from before the write.
+                    // Otherwise the update-interval gates (keyed off
+                    // `last_decrease_on_*`) could let a decrease fire
+                    // immediately against stale state, and a large elapsed
+                    // time since `last_increase_on_delay` could produce an
+                    // oversized multiplicative jump on top of the write we
+                    // just made.
+                    state.last_increase_on_delay = None;
+                    state.last_decrease_on_delay = now();
+                    state.last_increase_on_loss = now();
+                    state.last_decrease_on_loss = now();
+                    // The write says nothing about the link: forget the
+                    // moving average of past decreases, the way a fresh
+                    // element starts out.
+                    state.ema = Default::default();
+                }
+
+                // `notify` is emitted automatically once this call returns
+                // (the property isn't EXPLICIT_NOTIFY), and `state` is
+                // dropped before then, so no signal is emitted under the
+                // lock.
             }
             "estimator" => {
                 let mut state = self.state.lock().unwrap();
