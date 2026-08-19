@@ -1170,12 +1170,17 @@ impl Broadcast {
                 .build()
                 .map_err(|_| BroadcastError::Viewer(format!("`{name}` is unavailable")))
         };
-        // Congestion control is delegated to GStreamer's GCC estimator
-        // (rtpgccbwe), attached to the connection through webrtcbin's
-        // aux-sender hook; without the element the viewer holds the ceiling.
-        let adaptive_bwe = encoding.adaptive && gst::ElementFactory::find("rtpgccbwe").is_some();
+        // Congestion control is delegated to a GCC estimator, attached to the
+        // connection through webrtcbin's aux-sender hook; without the
+        // element the viewer holds the ceiling. `claritygccbwe` is the
+        // vendored element `ensure_gstreamer` registers, so it is available
+        // whenever GStreamer itself initialized; the `rtpgccbwe` check
+        // remains as a fallback for a caller that skipped that step.
+        let adaptive_bwe = encoding.adaptive
+            && (gst::ElementFactory::find("claritygccbwe").is_some()
+                || gst::ElementFactory::find("rtpgccbwe").is_some());
         if encoding.adaptive && !adaptive_bwe {
-            tracing::warn!("rtpgccbwe is unavailable; this viewer holds a fixed bitrate");
+            tracing::warn!("no GCC bandwidth estimator is available; this viewer holds a fixed bitrate");
         }
         let initial_kbps = if adaptive_bwe {
             start_video_kbps(encoding.bitrate_kbps)
@@ -2609,7 +2614,13 @@ fn wire_gcc_bwe(
     let max_bps = audio_bps + ceiling_kbps.saturating_mul(1000);
     let start_bps = audio_bps + start_video_kbps(ceiling_kbps) * 1000;
     webrtc.connect("request-aux-sender", false, move |_| {
-        let Ok(bwe) = gst::ElementFactory::make("rtpgccbwe").build() else {
+        // Prefer the vendored element; fall back to the system plugin for
+        // GStreamer installs this crate hasn't registered against (e.g. a
+        // test harness that skips `ensure_gstreamer`).
+        let bwe = gst::ElementFactory::make("claritygccbwe")
+            .build()
+            .or_else(|_| gst::ElementFactory::make("rtpgccbwe").build());
+        let Ok(bwe) = bwe else {
             return None;
         };
         // Bounds and the starting estimate are only settable before the

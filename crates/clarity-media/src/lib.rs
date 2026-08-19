@@ -15,6 +15,7 @@
 
 mod broadcast;
 mod capture;
+pub(crate) mod gcc;
 mod ice;
 mod overlay;
 mod playback;

@@ -10,6 +10,8 @@
 //! <https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/trendline_estimator.cc>
 //! which uses the same core algorithm as we do here.
 
+use gstreamer as gst;
+
 use super::Duration;
 use super::EstimatorImpl;
 use super::PacketGroup;

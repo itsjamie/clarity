@@ -1,5 +1,5 @@
 /**
- * element-rtpgccbwe:
+ * element-claritygccbwe:
  *
  * Implements the [Google Congestion Control algorithm](https://datatracker.ietf.org/doc/html/draft-ietf-rmcat-gcc-02).
  *
@@ -9,14 +9,16 @@
  *
  * This element implements the pacing as describe in the spec by running its
  * own streaming thread on its srcpad. It implements the mathematic as closely
- * to the specs as possible and sets the #rtpgccbwe:estimated-bitrate property
+ * to the specs as possible and sets the #claritygccbwe:estimated-bitrate property
  * each time a new estimate is produced. User should connect to the
- * `rtpgccbwe::notify::estimated-bitrate` signal to make the encoders target
+ * `claritygccbwe::notify::estimated-bitrate` signal to make the encoders target
  * that new estimated bitrate (the overall target bitrate of the potentially
  * multiple encoders should match that target bitrate, the application is
  * responsible for determining what bitrate to give to each encode)
  *
  */
+use gstreamer as gst;
+
 use gst::{glib, prelude::*, subclass::prelude::*};
 use smallvec::SmallVec;
 use std::sync::LazyLock;
@@ -39,7 +41,7 @@ const DEFAULT_MAX_BITRATE: Bitrate = 8_192_000;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
-        "rtpgccbwe",
+        "claritygccbwe",
         gst::DebugColorFlags::empty(),
         Some("Google Congestion Controller based bandwidth estimator"),
     )
@@ -276,7 +278,7 @@ use linear_regression_estimator::LinearRegressionEstimator;
 /// runtime through the "estimator" property.
 #[derive(Debug, Default, Copy, Clone, glib::Enum)]
 #[repr(i32)]
-#[enum_type(name = "GstRtpGCCBwEEstimator")]
+#[enum_type(name = "GstClarityGCCBwEEstimator")]
 pub enum Estimator {
     #[default]
     #[enum_value(name = "Use Kalman filter")]
@@ -1185,7 +1187,7 @@ impl BandwidthEstimator {
 
 #[glib::object_subclass]
 impl ObjectSubclass for BandwidthEstimator {
-    const NAME: &'static str = "GstRtpGCCBwE";
+    const NAME: &'static str = "GstClarityGCCBwE";
     type Type = super::BandwidthEstimator;
     type ParentType = gst::Element;
 
@@ -1444,6 +1446,8 @@ impl ElementImpl for BandwidthEstimator {
 
 #[cfg(test)]
 mod tests {
+    use gstreamer as gst;
+
     use super::{Detector, Estimator, Packet};
     use time::Duration;
     #[test]

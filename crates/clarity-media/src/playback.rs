@@ -1100,9 +1100,15 @@ fn end(shared: &Shared, reason: &str) {
 
 pub(crate) fn ensure_gstreamer() -> Result<(), PlaybackError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    INIT.get_or_init(|| gst::init().map_err(|error| error.to_string()))
-        .clone()
-        .map_err(PlaybackError::Init)
+    INIT.get_or_init(|| {
+        gst::init().map_err(|error| error.to_string())?;
+        // Registered once, here, rather than as part of a plugin: the
+        // OnceLock guarantees this body runs at most once even if
+        // `ensure_gstreamer` is called from many places concurrently.
+        crate::gcc::register().map_err(|error| error.to_string())
+    })
+    .clone()
+    .map_err(PlaybackError::Init)
 }
 
 #[cfg(test)]
