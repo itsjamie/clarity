@@ -475,10 +475,15 @@ async fn open_source(source: Source, profile: CaptureProfile) -> Result<SourceCo
 
 /// The adaptive bitrate ceiling per profile. Generous headroom so high-detail
 /// screen content (small text at high resolution) stays crisp; the congestion
-/// estimator scales the actual rate down when the link cannot sustain it.
+/// estimator scales the actual rate down when the link cannot sustain it, so
+/// the ceiling only needs to be safe, not conservative. Sized against what a
+/// browser spends on a comparable share: crisp 1440p-class text wants around
+/// 0.1 bit per pixel, which 6 Mbps does not reach. The connect-time burst is
+/// capped separately (see `start_video_kbps`), so a high ceiling does not
+/// flood a constrained link on join.
 pub fn bitrate_for(profile: CaptureProfile) -> u32 {
     match profile {
-        CaptureProfile::Text => 6_000,
-        CaptureProfile::Motion => 12_000,
+        CaptureProfile::Text => 12_000,
+        CaptureProfile::Motion => 18_000,
     }
 }

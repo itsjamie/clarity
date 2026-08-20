@@ -276,6 +276,22 @@ impl VideoCodec {
             encoder.set_property_from_str("tune", "low-latency");
             encoder.set_property("zerolatency", true);
             encoder.set_property("bframes", 0u32);
+            // Quality per bit. The p6 preset spends more GPU on each frame
+            // (hardware NVENC keeps that comfortably realtime at screen-share
+            // resolutions), spatial AQ shifts bits toward the detailed
+            // regions text lives in, and the quarter-resolution first pass
+            // lets the second pass place bits where the frame needs them.
+            // Guarded per property: older nvcodec builds lack some of these,
+            // and the encoder works without them.
+            if encoder.find_property("preset").is_some() {
+                encoder.set_property_from_str("preset", "p6");
+            }
+            if encoder.find_property("spatial-aq").is_some() {
+                encoder.set_property("spatial-aq", true);
+            }
+            if encoder.find_property("multi-pass").is_some() {
+                encoder.set_property_from_str("multi-pass", "two-pass-quarter");
+            }
             encoder.set_property("bitrate", initial_kbps);
             set_max_bitrate(encoder, initial_kbps);
         };
