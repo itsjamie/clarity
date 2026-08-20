@@ -558,6 +558,9 @@ pub struct Broadcast {
     /// The configured capture ceiling `fit_within_capture_ceiling` scales
     /// oversized sources into, re-applied when the source is replaced.
     capture_ceiling: (i64, i64),
+    /// The profile's frame rate, pinned into the normalize caps so the
+    /// stream is constant-rate into the encoder; re-applied on source swaps.
+    frame_rate: i32,
     /// The live capture backing the current source; dropping it revokes the
     /// compositor stream, so it is swapped together with the source head and
     /// released entirely while idle.
@@ -765,15 +768,19 @@ impl Broadcast {
         let scale = gst::ElementFactory::make("videoscale")
             .build()
             .map_err(start_error)?;
-        // Cap the frame rate to the profile's target. `max-rate` drops frames
-        // above the cap and never duplicates, so a static screen delivering a
-        // couple of keepalive frames a second is passed through untouched while a
-        // 60/120 Hz capture is thinned to the cap — the fps half of the
-        // Text/Motion profile.
-        let frame_rate = config.frame_rate.clamp(1, 120);
+        // Normalize to a constant frame rate at the profile's target: a
+        // 60/120 Hz capture is thinned to the cap, and a static screen's
+        // occasional keepalive frames are duplicated up to it. The
+        // duplication is what lets the encoder converge on quality:
+        // compositors only deliver frames on damage, NVENC budgets bits per
+        // frame, and a screen that stops moving right after a scroll would
+        // otherwise keep its last motion-quality frame nearly forever,
+        // receiving one small refinement installment per keepalive. At a
+        // constant rate the idle bitrate budget is spent sharpening within a
+        // second, after which duplicated frames encode as skips that cost
+        // almost nothing.
+        let frame_rate = config.frame_rate.clamp(1, 120) as i32;
         let videorate = gst::ElementFactory::make("videorate")
-            .property("max-rate", frame_rate as i32)
-            .property("drop-only", true)
             .build()
             .map_err(start_error)?;
         // The target size is computed here, never left to caps fixation:
@@ -788,6 +795,7 @@ impl Broadcast {
                 "caps",
                 gst::Caps::builder("video/x-raw")
                     .field("format", raw_format)
+                    .field("framerate", gst::Fraction::new(frame_rate, 1))
                     .build(),
             )
             .build()
@@ -797,7 +805,7 @@ impl Broadcast {
             .map_or(DEFAULT_CAPTURE_CEILING, |(width, height)| {
                 (i64::from(width.max(2)), i64::from(height.max(2)))
             });
-        wire_caps_notify(&head, &normalize, raw_format, capture_ceiling)?;
+        wire_caps_notify(&head, &normalize, raw_format, capture_ceiling, frame_rate)?;
         let tail = [convert, scale, videorate, normalize.clone()];
         // Zero viewers is a legal steady state: the tee must run unlinked
         // before the first admission and after the last departure.
@@ -900,6 +908,7 @@ impl Broadcast {
                 tail: tail[0].clone(),
                 normalize,
                 capture_ceiling,
+                frame_rate,
                 capture: Mutex::new(capture),
                 audio_head: Mutex::new(audio_head),
                 audio_tail_input,
@@ -957,7 +966,13 @@ impl Broadcast {
                 .expect("the source head is never empty")
                 .link(&self.tail)
                 .map_err(start_error)?;
-            wire_caps_notify(&new_head, &self.normalize, raw_format, self.capture_ceiling)?;
+            wire_caps_notify(
+                &new_head,
+                &self.normalize,
+                raw_format,
+                self.capture_ceiling,
+                self.frame_rate,
+            )?;
             for element in new_head.iter().rev() {
                 element
                     .sync_state_with_parent()
@@ -2306,6 +2321,7 @@ fn wire_caps_notify(
     normalize: &gst::Element,
     raw_format: &'static str,
     capture_ceiling: (i64, i64),
+    frame_rate: i32,
 ) -> Result<(), BroadcastError> {
     let source_pad = head
         .first()
@@ -2332,6 +2348,9 @@ fn wire_caps_notify(
                 .field("width", target_width)
                 .field("height", target_height)
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+                // Kept on every re-pin: the constant rate is what keeps the
+                // encoder refining a static screen (see the videorate above).
+                .field("framerate", gst::Fraction::new(frame_rate, 1))
                 .build(),
         );
     });
