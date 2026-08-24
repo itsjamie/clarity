@@ -221,6 +221,12 @@ pub fn body_radius(ctx: &egui::Context) -> u8 {
 pub fn resize_grips(ctx: &egui::Context) {
     use egui::{CursorIcon, ResizeDirection as Dir, ViewportCommand};
 
+    // winit cannot initiate resize drags on macOS. Its undecorated window keeps
+    // the native Borderless + Resizable style, so leave the edge hit-testing
+    // to AppKit instead of covering it with grips that cannot hand off.
+    if cfg!(target_os = "macos") {
+        return;
+    }
     if is_maximized(ctx) || is_fullscreen(ctx) {
         return;
     }
