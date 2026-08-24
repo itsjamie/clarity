@@ -124,6 +124,19 @@ enum Caption {
 /// of the chrome when the window loses focus.
 fn caption_tile(ui: &mut egui::Ui, pal: &Palette, kind: Caption, focused: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 26.0), Sense::click());
+    let accessible_label = match kind {
+        Caption::Minimize => "Minimize",
+        Caption::Maximize if is_maximized(ui.ctx()) => "Restore",
+        Caption::Maximize => "Maximize",
+        Caption::Close => "Close",
+    };
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            accessible_label,
+        )
+    });
     let hovered = resp.hovered();
     let (bg, fg) = match (kind, hovered, focused) {
         (Caption::Close, true, _) => (Color32::from_rgb(0xc4, 0x2b, 0x1c), Color32::WHITE),
@@ -134,6 +147,14 @@ fn caption_tile(ui: &mut egui::Ui, pal: &Palette, kind: Caption, focused: bool) 
     let p = ui.painter();
     if hovered {
         p.rect_filled(rect, CornerRadius::same(4), bg);
+    }
+    if resp.has_focus() {
+        p.rect_stroke(
+            rect.shrink(1.0),
+            CornerRadius::same(4),
+            Stroke::new(1.0_f32, pal.accent),
+            egui::StrokeKind::Inside,
+        );
     }
     // Snap the glyph centre to a pixel centre so 1px strokes stay crisp.
     let ppp = ui.ctx().pixels_per_point();
