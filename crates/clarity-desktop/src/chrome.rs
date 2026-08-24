@@ -1,8 +1,10 @@
-//! The window chrome: the custom title bar and the left sidebar. Both persist
-//! across every screen (the sidebar hides only in theatre mode).
+//! The window chrome: the custom title bar, the left sidebar, and the window
+//! controls the OS would normally draw (caption buttons, resize grips). The
+//! title bar hides in fullscreen, the sidebar in theatre.
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, Frame, Layout, Margin, Sense, Stroke, Vec2, vec2,
+    self, Align, Color32, CornerRadius, Frame, Layout, Margin, Pos2, Rect, Sense, Stroke, Vec2,
+    vec2,
 };
 
 use crate::state::{AppState, Screen};
@@ -17,35 +19,83 @@ pub fn title_bar(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
         .frame(
             Frame::NONE
                 .fill(pal.panel)
-                .inner_margin(Margin::symmetric(14, 0))
+                .inner_margin(Margin {
+                    left: 14,
+                    right: 8,
+                    top: 0,
+                    bottom: 0,
+                })
                 .stroke(Stroke::NONE),
         )
         .show(ui, |ui| {
+            let ctx = ui.ctx().clone();
             // The whole bar is a drag handle for moving the window. Start the OS
             // move once, on drag start — sending it every dragged() frame
             // re-grabs the window each frame so it never releases on mouse-up.
+            // `click_and_drag` makes egui wait for movement before calling it a
+            // drag, which is what keeps double-click distinguishable.
             let bar = ui.max_rect();
-            if ui
-                .interact(bar, ui.id().with("drag"), Sense::click_and_drag())
-                .drag_started()
-            {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            let resp = ui.interact(bar, ui.id().with("drag"), Sense::click_and_drag());
+            if resp.drag_started() {
+                hand_to_compositor(&ctx, egui::ViewportCommand::StartDrag);
             }
+            if resp.double_clicked() {
+                toggle_maximized(&ctx);
+            }
+            resp.context_menu(|ui| window_menu(ui, &ctx));
 
             ui.horizontal_centered(|ui| {
-                traffic_light(ui, pal.red, true);
-                traffic_light(ui, pal.amber, false);
-                traffic_light(ui, pal.green, false);
-                ui.add_space(6.0);
                 ui.label(mono_text(window_title(state), 11.0, pal.text_dim));
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let focused = is_focused(&ctx);
+                    if caption_tile(ui, pal, Caption::Close, focused).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if caption_tile(ui, pal, Caption::Maximize, focused).clicked() {
+                        toggle_maximized(&ctx);
+                    }
+                    if caption_tile(ui, pal, Caption::Minimize, focused).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    ui.add_space(10.0);
                     if search_button(ui, pal).clicked() {
                         state.palette_open = true;
                     }
                 });
             });
         });
+}
+
+/// The right-click menu on the title bar: what the OS menu would offer if it
+/// were drawing the decorations.
+fn window_menu(ui: &mut egui::Ui, ctx: &egui::Context) {
+    use egui::ViewportCommand;
+    ui.set_min_width(150.0);
+    if ui.button("Minimize").clicked() {
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        ui.close();
+    }
+    let label = if is_maximized(ctx) { "Restore" } else { "Maximize" };
+    if ui.button(label).clicked() {
+        toggle_maximized(ctx);
+        ui.close();
+    }
+    let label = if is_fullscreen(ctx) {
+        "Exit full screen"
+    } else {
+        "Full screen"
+    };
+    if ui.button(format!("{label}    {}", crate::theme::fullscreen_key())).clicked() {
+        toggle_fullscreen(ctx);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button(format!("Close    {} Q", crate::theme::mod_key())).clicked() {
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+        ui.close();
+    }
 }
 
 fn window_title(state: &AppState) -> String {
@@ -62,12 +112,187 @@ fn window_title(state: &AppState) -> String {
     format!("Clarity — {suffix}")
 }
 
-fn traffic_light(ui: &mut egui::Ui, color: Color32, closes: bool) {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::click());
-    ui.painter().circle_filled(rect.center(), 5.5, color);
-    if closes && resp.clicked() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caption {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// A Windows-style caption button: a flat tile with a 1px glyph that lights
+/// up on hover (close goes red, as everywhere else). Glyphs dim with the rest
+/// of the chrome when the window loses focus.
+fn caption_tile(ui: &mut egui::Ui, pal: &Palette, kind: Caption, focused: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 26.0), Sense::click());
+    let hovered = resp.hovered();
+    let (bg, fg) = match (kind, hovered, focused) {
+        (Caption::Close, true, _) => (Color32::from_rgb(0xc4, 0x2b, 0x1c), Color32::WHITE),
+        (_, true, _) => (Color32::from_white_alpha(14), pal.text),
+        (_, false, true) => (Color32::TRANSPARENT, pal.text_muted),
+        (_, false, false) => (Color32::TRANSPARENT, pal.text_dim),
+    };
+    let p = ui.painter();
+    if hovered {
+        p.rect_filled(rect, CornerRadius::same(4), bg);
     }
+    // Snap the glyph centre to a pixel centre so 1px strokes stay crisp.
+    let ppp = ui.ctx().pixels_per_point();
+    let snap = |v: f32| ((v * ppp).floor() + 0.5) / ppp;
+    let c = Pos2::new(snap(rect.center().x), snap(rect.center().y));
+    let stroke = Stroke::new(1.0_f32, fg);
+    match kind {
+        Caption::Minimize => {
+            p.line_segment([c - vec2(5.0, 0.0), c + vec2(5.0, 0.0)], stroke);
+        }
+        Caption::Maximize if is_maximized(ui.ctx()) => {
+            // Restore: a square with a second one peeking out behind it.
+            p.rect_stroke(
+                Rect::from_min_size(c + vec2(-5.0, -3.0), Vec2::splat(8.0)),
+                CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            p.line(
+                vec![c + vec2(-3.0, -5.0), c + vec2(5.0, -5.0), c + vec2(5.0, 3.0)],
+                stroke,
+            );
+        }
+        Caption::Maximize => {
+            p.rect_stroke(
+                Rect::from_center_size(c, Vec2::splat(10.0)),
+                CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Caption::Close => {
+            p.line_segment([c - vec2(5.0, 5.0), c + vec2(5.0, 5.0)], stroke);
+            p.line_segment([c - vec2(5.0, -5.0), c + vec2(5.0, -5.0)], stroke);
+        }
+    }
+    resp
+}
+
+// Window state, read from the viewport info egui is handed every frame.
+
+pub fn is_maximized(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().maximized == Some(true))
+}
+
+pub fn is_fullscreen(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().fullscreen == Some(true))
+}
+
+/// Unknown counts as focused, so the chrome never starts out dimmed.
+fn is_focused(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().focused != Some(false))
+}
+
+pub fn toggle_maximized(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized(ctx)));
+}
+
+pub fn toggle_fullscreen(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen(ctx)));
+}
+
+/// Starts a compositor-driven move or resize. The compositor grabs the pointer
+/// for the rest of the gesture, so egui never sees the button release: it
+/// would keep the widget dragged (and its cursor showing) until the next
+/// click. Ending the drag and forgetting the pointer here hands it over clean;
+/// the next motion event repopulates it.
+fn hand_to_compositor(ctx: &egui::Context, cmd: egui::ViewportCommand) {
+    ctx.send_viewport_cmd(cmd);
+    ctx.stop_dragging();
+    ctx.input_mut(|i| i.pointer = Default::default());
+}
+
+/// The window body's corner rounding: round while floating, square when it
+/// fills the screen.
+pub fn body_radius(ctx: &egui::Context) -> u8 {
+    if is_maximized(ctx) || is_fullscreen(ctx) { 0 } else { 12 }
+}
+
+/// Invisible grips along the window edges and corners. With OS decorations
+/// off there is no border to grab, so these hand the drag to the compositor
+/// with `BeginResize`; it sizes the window natively and honours the minimum
+/// size set at startup. Drawn last, on the foreground layer, so the outer few
+/// pixels win over whatever panel content sits under them.
+pub fn resize_grips(ctx: &egui::Context) {
+    use egui::{CursorIcon, ResizeDirection as Dir, ViewportCommand};
+
+    if is_maximized(ctx) || is_fullscreen(ctx) {
+        return;
+    }
+    let r = ctx.content_rect();
+    let edge = 6.0;
+    let corner = 16.0;
+    let (l, t, w, h) = (r.left(), r.top(), r.width(), r.height());
+    // Edges stop short of the corners so the two never overlap.
+    let grips = [
+        (
+            Rect::from_min_size(Pos2::new(l + corner, t), vec2(w - 2.0 * corner, edge)),
+            Dir::North,
+            CursorIcon::ResizeNorth,
+        ),
+        (
+            Rect::from_min_size(
+                Pos2::new(l + corner, r.bottom() - edge),
+                vec2(w - 2.0 * corner, edge),
+            ),
+            Dir::South,
+            CursorIcon::ResizeSouth,
+        ),
+        (
+            Rect::from_min_size(Pos2::new(l, t + corner), vec2(edge, h - 2.0 * corner)),
+            Dir::West,
+            CursorIcon::ResizeWest,
+        ),
+        (
+            Rect::from_min_size(
+                Pos2::new(r.right() - edge, t + corner),
+                vec2(edge, h - 2.0 * corner),
+            ),
+            Dir::East,
+            CursorIcon::ResizeEast,
+        ),
+        (
+            Rect::from_min_size(r.left_top(), Vec2::splat(corner)),
+            Dir::NorthWest,
+            CursorIcon::ResizeNorthWest,
+        ),
+        (
+            Rect::from_min_size(r.right_top() - vec2(corner, 0.0), Vec2::splat(corner)),
+            Dir::NorthEast,
+            CursorIcon::ResizeNorthEast,
+        ),
+        (
+            Rect::from_min_size(r.left_bottom() - vec2(0.0, corner), Vec2::splat(corner)),
+            Dir::SouthWest,
+            CursorIcon::ResizeSouthWest,
+        ),
+        (
+            Rect::from_min_size(r.right_bottom() - Vec2::splat(corner), Vec2::splat(corner)),
+            Dir::SouthEast,
+            CursorIcon::ResizeSouthEast,
+        ),
+    ];
+
+    egui::Area::new(egui::Id::new("window-resize"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .movable(false)
+        .show(ctx, |ui| {
+            for (i, (rect, dir, cursor)) in grips.iter().enumerate() {
+                let resp = ui.interact(*rect, ui.id().with(i), Sense::drag());
+                if resp.hovered() {
+                    ctx.set_cursor_icon(*cursor);
+                }
+                if resp.drag_started() {
+                    hand_to_compositor(ctx, ViewportCommand::BeginResize(*dir));
+                }
+            }
+        });
 }
 
 /// The full-width "Join by link" button under Create, matching the design's

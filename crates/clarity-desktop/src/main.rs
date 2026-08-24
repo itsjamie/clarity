@@ -436,24 +436,28 @@ impl eframe::App for ClarityApp {
             .then_some(self.state.viewer_view.stage_rect)
             .flatten();
 
-        // Rounded window body painted behind the panels.
+        // Window body painted behind the panels: rounded while floating,
+        // square once maximized or fullscreen. No shadow gutter: the body is
+        // the whole surface, so the compositor's edge snapping lines up.
+        let body = ui.max_rect();
+        let radius = egui::CornerRadius::same(chrome::body_radius(&ctx));
         let painter = ctx.layer_painter(egui::LayerId::background());
         match hole {
             Some(hole) => {
                 // Four rects can't round corners, so the body loses its corner
                 // rounding while a native room is on screen — acceptable.
-                crate::ui::fill_around(&painter, ui.max_rect(), hole, self.pal.window);
+                crate::ui::fill_around(&painter, body, hole, self.pal.window);
                 painter.rect_stroke(
-                    ui.max_rect(),
-                    egui::CornerRadius::same(12),
+                    body,
+                    radius,
                     egui::Stroke::new(1.0_f32, self.pal.border),
                     egui::StrokeKind::Inside,
                 );
             }
             None => {
                 painter.rect(
-                    ui.max_rect(),
-                    egui::CornerRadius::same(12),
+                    body,
+                    radius,
                     self.pal.window,
                     egui::Stroke::new(1.0_f32, self.pal.border),
                     egui::StrokeKind::Inside,
@@ -461,7 +465,11 @@ impl eframe::App for ClarityApp {
             }
         }
 
-        chrome::title_bar(ui, &self.pal, &mut self.state);
+        // Fullscreen is the one state with no window to manage, so the bar
+        // goes too; F11/Esc bring it back.
+        if !chrome::is_fullscreen(&ctx) {
+            chrome::title_bar(ui, &self.pal, &mut self.state);
+        }
 
         if self.state.shows_sidebar() {
             chrome::sidebar(ui, &self.pal, &mut self.state);
@@ -497,6 +505,8 @@ impl eframe::App for ClarityApp {
         if self.state.palette_open {
             screens::command_palette(&ctx, &self.pal, &mut self.state);
         }
+
+        chrome::resize_grips(&ctx);
 
         self.capture.tick(&ctx);
     }
@@ -685,10 +695,30 @@ fn native_handle(frame: &eframe::Frame) -> Option<clarity_client::NativeHandle> 
 }
 
 fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
+    use egui::{Key, Modifiers};
     // Read focus first: `memory()` takes the same context lock that `input_mut()`
-    // holds, so reading it inside the closure would deadlock.
+    // holds, so reading it inside the closure would deadlock. Viewport commands
+    // take it too, so window actions are collected here and sent afterwards.
     let typing = ctx.memory(|m| m.focused().is_some());
+    let mut toggle_fullscreen = false;
+    let mut close = false;
     ctx.input_mut(|i| {
+        // Window: F11 (⌃⌘F on macOS) toggles fullscreen, ⌘Q quits, and ⌘W
+        // closes the window on macOS where that's expected of every app.
+        let (fs_mods, fs_key) = if cfg!(target_os = "macos") {
+            (Modifiers::MAC_CMD | Modifiers::CTRL, Key::F)
+        } else {
+            (Modifiers::NONE, Key::F11)
+        };
+        if i.consume_key(fs_mods, fs_key) {
+            toggle_fullscreen = true;
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::Q)
+            || (cfg!(target_os = "macos") && i.consume_key(Modifiers::COMMAND, Key::W))
+        {
+            close = true;
+        }
+
         if i.consume_key(egui::Modifiers::COMMAND, egui::Key::K) {
             state.open_palette();
         }
@@ -707,11 +737,20 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.go(Screen::Settings);
         }
         if i.key_pressed(egui::Key::Escape) {
+            // Overlays first; with nothing open, Esc leaves fullscreen.
+            let had_overlay = state.palette_open
+                || state.create_open
+                || state.join_open
+                || state.theatre
+                || state.name_edit_open;
             state.palette_open = false;
             state.create_open = false;
             state.join_open = false;
             state.theatre = false;
             state.name_edit_open = false;
+            if !had_overlay && i.viewport().fullscreen == Some(true) {
+                toggle_fullscreen = true;
+            }
         }
         // `T` toggles theatre in the room, when not typing in a field.
         if state.screen == Screen::Room
@@ -721,6 +760,12 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.theatre = !state.theatre;
         }
     });
+    if toggle_fullscreen {
+        chrome::toggle_fullscreen(ctx);
+    }
+    if close {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
 }
 
 /// Baseline egui styling: dark, tight spacing, the design's text sizes. Most

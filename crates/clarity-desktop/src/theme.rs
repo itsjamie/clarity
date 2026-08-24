@@ -28,6 +28,11 @@ pub fn mod_key() -> &'static str {
     if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" }
 }
 
+/// The platform's fullscreen shortcut, as shown in menus.
+pub fn fullscreen_key() -> &'static str {
+    if cfg!(target_os = "macos") { "⌃⌘F" } else { "F11" }
+}
+
 /// Every color the design uses, resolved from oklch to sRGB.
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // some fields are used by screens landing in the next pass

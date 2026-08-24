@@ -10,7 +10,7 @@ clarity-client = { path = "../clarity-client" }
 clarity-core = { path = "../clarity-core" }
 clarity-identity = { path = "../clarity-identity" }
 clarity-protocol = { path = "../clarity-protocol" }
-eframe = "0.36"
+eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["svg"] }
 png = "0.17"
