@@ -105,11 +105,22 @@ impl Default for RoomActorConfig {
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
     pub outbound: mpsc::Sender<ServerMessage>,
+    pub connection_id: String,
+    pub close: mpsc::UnboundedSender<()>,
+}
+
+/// One concrete transport connection for a peer. Peer ids survive reconnects;
+/// connection ids do not, so superseded sockets cannot act as their replacement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionIdentity {
+    pub peer_id: String,
+    pub connection_id: String,
 }
 
 pub struct AuthOutcome {
     pub room_id: String,
     pub peer_id: String,
+    pub connection_id: String,
     pub role: PeerRole,
     pub resume_token: SecretString,
     pub resume_expires_at: OffsetDateTime,
@@ -179,56 +190,60 @@ pub enum RoomCommand {
         reply: oneshot::Sender<CommandResult<AuthOutcome>>,
     },
     Approve {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         target_peer_id: String,
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
     Reject {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         target_peer_id: String,
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
     Kick {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         target_peer_id: String,
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
     UpdateCapacity {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         maximum_viewers: u8,
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
     UpdateSharingState {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         sharing_state: SharingState,
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
     UpdateViewerDisplayName {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         display_name: Option<String>,
         request_id: String,
         reply: oneshot::Sender<CommandResult>,
     },
     RouteSignal {
-        source_peer_id: String,
+        source: ConnectionIdentity,
         destination_peer_id: String,
         request_id: String,
         signal: RoutedSignal,
         reply: oneshot::Sender<CommandResult>,
     },
     Disconnect {
-        peer_id: String,
+        session: ConnectionIdentity,
     },
     Leave {
-        peer_id: String,
+        session: ConnectionIdentity,
     },
     Close {
-        source_peer_id: String,
+        source: ConnectionIdentity,
+        reply: oneshot::Sender<CommandResult>,
+    },
+    ValidateConnection {
+        source: ConnectionIdentity,
         reply: oneshot::Sender<CommandResult>,
     },
     Snapshot {
@@ -247,6 +262,7 @@ pub enum RoomCommand {
 #[derive(Debug)]
 struct PeerSession {
     peer_id: String,
+    connection_id: String,
     role: PeerRole,
     display_name: Option<String>,
     friend_code: Option<String>,
@@ -254,6 +270,7 @@ struct PeerSession {
     joined_at: OffsetDateTime,
     connected: bool,
     outbound: Option<mpsc::Sender<ServerMessage>>,
+    close: mpsc::UnboundedSender<()>,
     resume_digest: SecretDigest,
     resume_expires_at: OffsetDateTime,
     disconnected_at: Option<OffsetDateTime>,
@@ -443,6 +460,7 @@ impl RoomState {
         );
         self.presenter = Some(PeerSession {
             peer_id: peer_id.clone(),
+            connection_id: session.connection_id.clone(),
             role: PeerRole::Presenter,
             display_name: None,
             friend_code: None,
@@ -450,6 +468,7 @@ impl RoomState {
             joined_at: self.presenter.as_ref().map_or(now, |peer| peer.joined_at),
             connected: true,
             outbound: Some(session.outbound),
+            close: session.close,
             resume_digest: self.secrets.resume_digest(&resume_token),
             resume_expires_at,
             disconnected_at: None,
@@ -457,6 +476,7 @@ impl RoomState {
         Ok(AuthOutcome {
             room_id: self.room_id.clone(),
             peer_id,
+            connection_id: session.connection_id,
             role: PeerRole::Presenter,
             resume_token,
             resume_expires_at,
@@ -513,6 +533,7 @@ impl RoomState {
         let resume_expires_at = now + self.viewer_resume_grace;
         let viewer = PeerSession {
             peer_id: peer_id.clone(),
+            connection_id: session.connection_id.clone(),
             role: PeerRole::Viewer,
             display_name: display_name.and_then(|name| sanitize_display_name(&name)),
             friend_code,
@@ -524,6 +545,7 @@ impl RoomState {
             joined_at: now,
             connected: true,
             outbound: Some(session.outbound),
+            close: session.close,
             resume_digest: self.secrets.resume_digest(&resume_token),
             resume_expires_at,
             disconnected_at: None,
@@ -542,6 +564,7 @@ impl RoomState {
         Ok(AuthOutcome {
             room_id: self.room_id.clone(),
             peer_id,
+            connection_id: session.connection_id,
             role: PeerRole::Viewer,
             resume_token,
             resume_expires_at,
@@ -569,6 +592,8 @@ impl RoomState {
             }
             presenter.connected = true;
             presenter.outbound = Some(session.outbound.clone());
+            presenter.connection_id.clone_from(&session.connection_id);
+            presenter.close = session.close.clone();
             presenter.disconnected_at = None;
             Some((presenter.peer_id.clone(), presenter.resume_expires_at))
         } else {
@@ -582,6 +607,7 @@ impl RoomState {
             return Ok(AuthOutcome {
                 room_id: self.room_id.clone(),
                 peer_id,
+                connection_id: session.connection_id.clone(),
                 role: PeerRole::Presenter,
                 resume_token: token.clone(),
                 resume_expires_at,
@@ -602,6 +628,8 @@ impl RoomState {
             }
             viewer.connected = true;
             viewer.outbound = Some(session.outbound);
+            viewer.connection_id.clone_from(&session.connection_id);
+            viewer.close = session.close;
             viewer.disconnected_at = None;
             if viewer.viewer_state == Some(ViewerState::Disconnected) {
                 viewer.viewer_state = Some(ViewerState::Approved);
@@ -616,6 +644,7 @@ impl RoomState {
             return Ok(AuthOutcome {
                 room_id: self.room_id.clone(),
                 peer_id,
+                connection_id: session.connection_id,
                 role: PeerRole::Viewer,
                 resume_token: token.clone(),
                 resume_expires_at,
@@ -632,6 +661,22 @@ impl RoomState {
             .as_ref()
             .is_some_and(|peer| peer.peer_id == source_peer_id)
         {
+            Ok(())
+        } else {
+            Err(DomainError::AuthorizationDenied)
+        }
+    }
+
+    fn ensure_connection(&self, source: &ConnectionIdentity) -> CommandResult {
+        let active = self
+            .presenter
+            .as_ref()
+            .filter(|peer| peer.peer_id == source.peer_id)
+            .or_else(|| self.viewers.get(&source.peer_id))
+            .is_some_and(|peer| {
+                peer.connected && peer.connection_id == source.connection_id
+            });
+        if active {
             Ok(())
         } else {
             Err(DomainError::AuthorizationDenied)
@@ -948,11 +993,13 @@ impl RoomState {
         });
     }
 
-    fn disconnect(&mut self, peer_id: &str, now: OffsetDateTime) {
+    fn disconnect(&mut self, session: &ConnectionIdentity, now: OffsetDateTime) {
         if let Some(presenter) = self
             .presenter
             .as_mut()
-            .filter(|peer| peer.peer_id == peer_id)
+            .filter(|peer| {
+                peer.peer_id == session.peer_id && peer.connection_id == session.connection_id
+            })
         {
             presenter.connected = false;
             presenter.outbound = None;
@@ -964,7 +1011,11 @@ impl RoomState {
             });
             return;
         }
-        if let Some(viewer) = self.viewers.get_mut(peer_id) {
+        if let Some(viewer) = self
+            .viewers
+            .get_mut(&session.peer_id)
+            .filter(|peer| peer.connection_id == session.connection_id)
+        {
             viewer.connected = false;
             viewer.outbound = None;
             viewer.disconnected_at = Some(now);
@@ -976,11 +1027,15 @@ impl RoomState {
         }
     }
 
-    fn leave(&mut self, peer_id: &str, now: OffsetDateTime) {
+    fn leave(&mut self, session: &ConnectionIdentity, now: OffsetDateTime) {
+        if self.ensure_connection(session).is_err() {
+            return;
+        }
+        let peer_id = &session.peer_id;
         if self
             .presenter
             .as_ref()
-            .is_some_and(|peer| peer.peer_id == peer_id)
+            .is_some_and(|peer| peer.peer_id == *peer_id)
         {
             self.close(now, false);
         } else if self.viewers.remove(peer_id).is_some() {
@@ -1070,6 +1125,7 @@ fn try_send(peer: &mut PeerSession, message: ServerMessage) -> bool {
         Ok(()) => true,
         Err(error) => {
             warn!(peer_id = %peer.peer_id, error = %error, "peer outbound queue unavailable");
+            let _ = peer.close.send(());
             peer.connected = false;
             peer.outbound = None;
             false
@@ -1290,32 +1346,42 @@ async fn run_room_actor(
                     RoomCommand::Resume { resume_token, session, reply } => {
                         let _ = reply.send(room.resume(&resume_token, session, now));
                     }
-                    RoomCommand::Approve { source_peer_id, target_peer_id, request_id, reply } => {
-                        let _ = reply.send(room.approve(&source_peer_id, &target_peer_id, request_id, now));
-                    }
-                    RoomCommand::Reject { source_peer_id, target_peer_id, request_id, reply } => {
-                        let _ = reply.send(room.reject(&source_peer_id, &target_peer_id, request_id, now));
-                    }
-                    RoomCommand::Kick { source_peer_id, target_peer_id, request_id, reply } => {
-                        let _ = reply.send(room.kick(&source_peer_id, &target_peer_id, request_id, now));
-                    }
-                    RoomCommand::UpdateCapacity { source_peer_id, maximum_viewers, request_id, reply } => {
-                        let _ = reply.send(room.update_capacity(&source_peer_id, maximum_viewers, request_id, now));
-                    }
-                    RoomCommand::UpdateSharingState { source_peer_id, sharing_state, request_id, reply } => {
-                        let _ = reply.send(room.update_sharing_state(&source_peer_id, sharing_state, request_id, now));
-                    }
-                    RoomCommand::UpdateViewerDisplayName { source_peer_id, display_name, request_id, reply } => {
-                        let _ = reply.send(room.update_viewer_display_name(&source_peer_id, display_name, request_id, now));
-                    }
-                    RoomCommand::RouteSignal { source_peer_id, destination_peer_id, request_id, signal, reply } => {
-                        let _ = reply.send(room.route_signal(&source_peer_id, &destination_peer_id, request_id, signal, now));
-                    }
-                    RoomCommand::Disconnect { peer_id } => room.disconnect(&peer_id, now),
-                    RoomCommand::Leave { peer_id } => room.leave(&peer_id, now),
-                    RoomCommand::Close { source_peer_id, reply } => {
-                        let result = room.ensure_presenter(&source_peer_id).map(|()| room.close(now, false));
+                    RoomCommand::Approve { source, target_peer_id, request_id, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.approve(&source.peer_id, &target_peer_id, request_id, now));
                         let _ = reply.send(result);
+                    }
+                    RoomCommand::Reject { source, target_peer_id, request_id, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.reject(&source.peer_id, &target_peer_id, request_id, now));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::Kick { source, target_peer_id, request_id, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.kick(&source.peer_id, &target_peer_id, request_id, now));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::UpdateCapacity { source, maximum_viewers, request_id, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.update_capacity(&source.peer_id, maximum_viewers, request_id, now));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::UpdateSharingState { source, sharing_state, request_id, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.update_sharing_state(&source.peer_id, sharing_state, request_id, now));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::UpdateViewerDisplayName { source, display_name, request_id, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.update_viewer_display_name(&source.peer_id, display_name, request_id, now));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::RouteSignal { source, destination_peer_id, request_id, signal, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.route_signal(&source.peer_id, &destination_peer_id, request_id, signal, now));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::Disconnect { session } => room.disconnect(&session, now),
+                    RoomCommand::Leave { session } => room.leave(&session, now),
+                    RoomCommand::Close { source, reply } => {
+                        let result = room.ensure_connection(&source).and_then(|()| room.ensure_presenter(&source.peer_id)).map(|()| room.close(now, false));
+                        let _ = reply.send(result);
+                    }
+                    RoomCommand::ValidateConnection { source, reply } => {
+                        let _ = reply.send(room.ensure_connection(&source));
                     }
                     RoomCommand::Snapshot { reply } => { let _ = reply.send(room.snapshot(now)); }
                     RoomCommand::VerifyPresenter { credential, reply } => {
@@ -1371,6 +1437,8 @@ pub fn sanitize_display_name(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use crate::{ManualClock, secret_as_str};
 
@@ -1418,8 +1486,74 @@ mod tests {
     }
 
     fn session() -> (SessionHandle, mpsc::Receiver<ServerMessage>) {
+        static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
         let (outbound, receiver) = mpsc::channel(8);
-        (SessionHandle { outbound }, receiver)
+        let (close, _) = mpsc::unbounded_channel();
+        (
+            SessionHandle {
+                outbound,
+                connection_id: format!(
+                    "test-{}",
+                    NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+                ),
+                close,
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn superseded_presenter_connection_cannot_disconnect_or_act_for_replacement() {
+        let (mut room, _, presenter_secret, _, now) = fixture();
+        let first = room
+            .authenticate_presenter(&presenter_secret, session().0, now)
+            .expect("first authentication");
+        let second = room
+            .authenticate_presenter(&presenter_secret, session().0, now)
+            .expect("replacement authentication");
+        let first = ConnectionIdentity {
+            peer_id: first.peer_id,
+            connection_id: first.connection_id,
+        };
+        let second = ConnectionIdentity {
+            peer_id: second.peer_id,
+            connection_id: second.connection_id,
+        };
+
+        room.disconnect(&first, now);
+
+        assert!(room.snapshot(now).presenter_connected);
+        assert_eq!(
+            room.ensure_connection(&first).expect_err("superseded connection"),
+            DomainError::AuthorizationDenied
+        );
+        room.ensure_connection(&second).expect("replacement connection");
+    }
+
+    #[test]
+    fn a_full_outbound_queue_requests_transport_shutdown() {
+        let (mut room, _, presenter_secret, viewer_secret, now) =
+            fixture_with_policy(RoomAccessPolicy::Public);
+        let (outbound, _receiver) = mpsc::channel(1);
+        let (close, mut close_requests) = mpsc::unbounded_channel();
+        room.authenticate_presenter(
+            &presenter_secret,
+            SessionHandle {
+                outbound,
+                connection_id: "full-queue-test".to_owned(),
+                close,
+            },
+            now,
+        )
+        .expect("presenter");
+
+        room.authenticate_viewer(&viewer_secret, None, None, session().0, now)
+            .expect("first viewer fills the presenter queue");
+        room.authenticate_viewer(&viewer_secret, None, None, session().0, now)
+            .expect("second viewer detects the full presenter queue");
+
+        assert_eq!(close_requests.try_recv(), Ok(()));
+        assert!(!room.snapshot(now).presenter_connected);
     }
 
     #[test]
@@ -1477,7 +1611,13 @@ mod tests {
         let viewer = room
             .authenticate_viewer(&viewer_secret, None, None, session().0, now)
             .expect("viewer");
-        room.disconnect(&viewer.peer_id, now);
+        room.disconnect(
+            &ConnectionIdentity {
+                peer_id: viewer.peer_id.clone(),
+                connection_id: viewer.connection_id.clone(),
+            },
+            now,
+        );
 
         let late = now + RoomActorConfig::default().viewer_resume_grace + Duration::seconds(1);
         assert_eq!(
@@ -1731,7 +1871,10 @@ mod tests {
             .dispatch(
                 &created.room_id,
                 RoomCommand::Close {
-                    source_peer_id: presenter.peer_id,
+                    source: ConnectionIdentity {
+                        peer_id: presenter.peer_id,
+                        connection_id: presenter.connection_id,
+                    },
                     reply: close_tx,
                 },
             )

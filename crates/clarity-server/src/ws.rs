@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, time::Instant};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Instant,
+};
 
 use axum::{
     extract::{
@@ -9,8 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use clarity_core::{
-    AuthOutcome, DomainError, RoomCommand, RoutedSignal, SessionHandle, new_challenge,
-    secret_as_str, verify_identity_for_hosts,
+    AuthOutcome, ConnectionIdentity, DomainError, RoomCommand, RoutedSignal, SessionHandle,
+    new_challenge, secret_as_str, verify_identity_for_hosts,
 };
 use clarity_protocol::{
     ClientMessage, ErrorCode, IDENTITY_CONTEXT_ROOM_AUTH, PROTOCOL_VERSION, PeerRole,
@@ -26,6 +29,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     app::{AppError, validate_origin},
+    client_ip::client_ip,
     rate_limit::SessionRateLimiter,
 };
 
@@ -33,7 +37,17 @@ use crate::{
 struct AuthenticatedSession {
     room_id: String,
     peer_id: String,
+    connection_id: String,
     role: PeerRole,
+}
+
+impl AuthenticatedSession {
+    fn identity(&self) -> ConnectionIdentity {
+        ConnectionIdentity {
+            peer_id: self.peer_id.clone(),
+            connection_id: self.connection_id.clone(),
+        }
+    }
 }
 
 pub async fn upgrade(
@@ -43,9 +57,10 @@ pub async fn upgrade(
     websocket: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_origin(&state.config, &headers)?;
+    let client_ip = client_ip(remote, &headers, state.config.trusted_proxy_hops);
     if !state.rate_limits.check(
         "websocket-connect",
-        &remote.ip().to_string(),
+        &client_ip.to_string(),
         state.config.websocket_connection_rate_limit,
     ) {
         return Err(AppError::new(
@@ -58,14 +73,15 @@ pub async fn upgrade(
     Ok(websocket
         .max_message_size(maximum_size)
         .max_frame_size(maximum_size)
-        .on_upgrade(move |socket| handle_socket(socket, state, remote))
+        .on_upgrade(move |socket| handle_socket(socket, state, client_ip))
         .into_response())
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, remote: SocketAddr) {
+async fn handle_socket(socket: WebSocket, state: AppState, client_ip: IpAddr) {
     let (mut socket_writer, mut socket_reader) = socket.split();
     let (outbound_tx, mut outbound_rx) =
         mpsc::channel::<ServerMessage>(state.config.room_actor.outbound_capacity);
+    let (close_tx, mut close_rx) = mpsc::unbounded_channel::<()>();
     let writer = tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
             let Ok(json) = serde_json::to_string(&message) else {
@@ -84,7 +100,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, remote: SocketAddr) {
 
     let authentication = tokio::time::timeout(
         state.config.websocket_auth_timeout,
-        authenticate(&mut socket_reader, &outbound_tx, &state, remote),
+        authenticate(
+            &mut socket_reader,
+            &outbound_tx,
+            close_tx,
+            &state,
+            client_ip,
+        ),
     )
     .await;
 
@@ -114,9 +136,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, remote: SocketAddr) {
     let mut heartbeat = tokio::time::interval(state.config.websocket_heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_heartbeat: Option<(String, Instant)> = None;
+    let mut close_channel_open = true;
 
     loop {
         tokio::select! {
+            close = close_rx.recv(), if close_channel_open => {
+                if close.is_some() {
+                    break;
+                }
+                // Dropping a session record is not itself a transport failure.
+                // Only an explicit close message terminates the socket.
+                close_channel_open = false;
+            }
             _ = heartbeat.tick() => {
                 if pending_heartbeat.as_ref().is_some_and(|(_, deadline)| Instant::now() >= *deadline) {
                     warn!(room_id = %session.room_id, peer_id = %session.peer_id, "signaling heartbeat timed out");
@@ -182,7 +213,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, remote: SocketAddr) {
         .dispatch(
             &session.room_id,
             RoomCommand::Disconnect {
-                peer_id: session.peer_id.clone(),
+                session: session.identity(),
             },
         )
         .await;
@@ -213,8 +244,9 @@ fn authentication_failure(error: &DomainError) -> (ErrorCode, &'static str) {
 async fn authenticate(
     reader: &mut futures_util::stream::SplitStream<WebSocket>,
     outbound: &mpsc::Sender<ServerMessage>,
+    close: mpsc::UnboundedSender<()>,
     state: &AppState,
-    remote: SocketAddr,
+    client_ip: IpAddr,
 ) -> Result<AuthenticatedSession, DomainError> {
     let message = match parse_incoming(
         reader.next().await,
@@ -243,7 +275,7 @@ async fn authenticate(
     }
     if !state.rate_limits.check(
         "auth",
-        &remote.ip().to_string(),
+        &client_ip.to_string(),
         state.config.auth_rate_limit,
     ) {
         send_auth_failed(
@@ -256,6 +288,8 @@ async fn authenticate(
     }
     let session_handle = SessionHandle {
         outbound: outbound.clone(),
+        connection_id: Uuid::new_v4().to_string(),
+        close,
     };
     let (room_id, request_id, outcome) = match message {
         ClientMessage::AuthPresenter {
@@ -323,6 +357,7 @@ async fn authenticate(
     Ok(AuthenticatedSession {
         room_id,
         peer_id: outcome.peer_id,
+        connection_id: outcome.connection_id,
         role: outcome.role,
     })
 }
@@ -460,7 +495,7 @@ async fn handle_authenticated_message(
             ..
         } => {
             action(state, &session.room_id, |reply| RoomCommand::Approve {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 target_peer_id: peer_id,
                 request_id,
                 reply,
@@ -473,7 +508,7 @@ async fn handle_authenticated_message(
             ..
         } => {
             action(state, &session.room_id, |reply| RoomCommand::Reject {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 target_peer_id: peer_id,
                 request_id,
                 reply,
@@ -486,7 +521,7 @@ async fn handle_authenticated_message(
             ..
         } => {
             action(state, &session.room_id, |reply| RoomCommand::Kick {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 target_peer_id: peer_id,
                 request_id,
                 reply,
@@ -500,7 +535,7 @@ async fn handle_authenticated_message(
         } => {
             action(state, &session.room_id, |reply| {
                 RoomCommand::UpdateCapacity {
-                    source_peer_id: session.peer_id.clone(),
+                    source: session.identity(),
                     maximum_viewers,
                     request_id,
                     reply,
@@ -515,7 +550,7 @@ async fn handle_authenticated_message(
         } => {
             action(state, &session.room_id, |reply| {
                 RoomCommand::UpdateSharingState {
-                    source_peer_id: session.peer_id.clone(),
+                    source: session.identity(),
                     sharing_state,
                     request_id,
                     reply,
@@ -530,7 +565,7 @@ async fn handle_authenticated_message(
         } => {
             action(state, &session.room_id, |reply| {
                 RoomCommand::UpdateViewerDisplayName {
-                    source_peer_id: session.peer_id.clone(),
+                    source: session.identity(),
                     display_name,
                     request_id,
                     reply,
@@ -540,7 +575,7 @@ async fn handle_authenticated_message(
         }
         ClientMessage::RoomClose { .. } => {
             action(state, &session.room_id, |reply| RoomCommand::Close {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 reply,
             })
             .await
@@ -553,7 +588,7 @@ async fn handle_authenticated_message(
                 .dispatch(
                     &session.room_id,
                     RoomCommand::Leave {
-                        peer_id: session.peer_id.clone(),
+                        session: session.identity(),
                     },
                 )
                 .await
@@ -569,7 +604,7 @@ async fn handle_authenticated_message(
                 return Err((Some(request_id), DomainError::MessageTooLarge));
             }
             action(state, &session.room_id, |reply| RoomCommand::RouteSignal {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 destination_peer_id,
                 request_id,
                 signal: RoutedSignal::Offer { sdp, ice_restart },
@@ -587,7 +622,7 @@ async fn handle_authenticated_message(
                 return Err((Some(request_id), DomainError::MessageTooLarge));
             }
             action(state, &session.room_id, |reply| RoomCommand::RouteSignal {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 destination_peer_id,
                 request_id,
                 signal: RoutedSignal::Answer { sdp },
@@ -607,7 +642,7 @@ async fn handle_authenticated_message(
                 return Err((Some(request_id), DomainError::MessageTooLarge));
             }
             action(state, &session.room_id, |reply| RoomCommand::RouteSignal {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 destination_peer_id,
                 request_id,
                 signal: RoutedSignal::IceCandidate {
@@ -625,7 +660,7 @@ async fn handle_authenticated_message(
             ..
         } => {
             action(state, &session.room_id, |reply| RoomCommand::RouteSignal {
-                source_peer_id: session.peer_id.clone(),
+                source: session.identity(),
                 destination_peer_id,
                 request_id,
                 signal: RoutedSignal::IceRestart,
@@ -634,6 +669,12 @@ async fn handle_authenticated_message(
             .await
         }
         ClientMessage::IceRefresh { request_id, .. } => {
+            action(state, &session.room_id, |reply| RoomCommand::ValidateConnection {
+                source: session.identity(),
+                reply,
+            })
+            .await
+            .map_err(|error| (Some(request_id.clone()), error))?;
             let configuration = state
                 .turn
                 .issue(&session.peer_id, OffsetDateTime::now_utc())

@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clarity_protocol::{ChatMessage, IceConfiguration};
+use clarity_protocol::{
+    CHAT_MAX_BUFFERED_BYTES, CHAT_MAX_PAYLOAD_BYTES, ChatMessage, IceConfiguration,
+};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_sdp as gst_sdp;
@@ -158,7 +160,10 @@ impl VideoCodec {
     /// the codec every WebRTC endpoint must decode.
     fn resolve_ranking(ranking: &[VideoCodecId]) -> Vec<Self> {
         let ranked: Vec<Self> = if ranking.is_empty() {
-            VideoCodecId::ALL.iter().map(|id| Self::from_id(*id)).collect()
+            VideoCodecId::ALL
+                .iter()
+                .map(|id| Self::from_id(*id))
+                .collect()
         } else {
             ranking.iter().map(|id| Self::from_id(*id)).collect()
         };
@@ -853,9 +858,9 @@ impl Broadcast {
                 .add_many(&preview)
                 .map_err(|error| BroadcastError::Start(error.to_string()))?;
             gst::Element::link_many(&preview).map_err(start_error)?;
-            let tee_pad = tee
-                .request_pad_simple("src_%u")
-                .ok_or_else(|| BroadcastError::Start("the preview tee pad is unavailable".into()))?;
+            let tee_pad = tee.request_pad_simple("src_%u").ok_or_else(|| {
+                BroadcastError::Start("the preview tee pad is unavailable".into())
+            })?;
             let queue_sink = preview[0]
                 .static_pad("sink")
                 .ok_or_else(|| BroadcastError::Start("the preview queue has no sink".into()))?;
@@ -893,8 +898,7 @@ impl Broadcast {
             .map_err(|error| BroadcastError::Start(error.to_string()))?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let bus_thread =
-            spawn_bus_thread(&pipeline, &tee, audio_tee.as_ref(), &shared, &shutdown)?;
+        let bus_thread = spawn_bus_thread(&pipeline, &tee, audio_tee.as_ref(), &shared, &shutdown)?;
 
         Ok((
             Self {
@@ -929,16 +933,39 @@ impl Broadcast {
         let audio_mode = AudioHeadMode::of(&source);
         let (new_head, new_capture) = build_source_head(source)?;
         let raw_format = self.shared.top_codec().raw_format();
+        let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
+
+        // Preflight every operation that can run while the old source remains
+        // untouched. The new elements stay in Null until the atomic swap.
+        if let Err(error) = self.pipeline.add_many(&new_head).map_err(start_error) {
+            remove_source_head(&self.pipeline, &new_head);
+            return Err(error);
+        }
+        if let Err(error) = gst::Element::link_many(&new_head).map_err(start_error) {
+            remove_source_head(&self.pipeline, &new_head);
+            return Err(error);
+        }
+        if let Err(error) = wire_caps_notify(
+            &new_head,
+            &self.normalize,
+            raw_format,
+            self.capture_ceiling,
+            self.frame_rate,
+        ) {
+            remove_source_head(&self.pipeline, &new_head);
+            return Err(error);
+        }
         {
             let mut head = self.source_head.lock().expect("source lock");
             let old_head = std::mem::take(&mut *head);
+            let mut parked_probe = None;
             if let Some(head_src) = old_head.last().and_then(|element| element.static_pad("src")) {
                 // Park the old head's streaming thread before unlinking so it
                 // can never push into a half-swapped tail. The probe fires
                 // once the thread reaches the pad; a stalled source has
                 // nothing in flight, which the timeout treats as parked.
                 let (parked, wait_parked) = std::sync::mpsc::channel::<()>();
-                head_src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
+                let probe = head_src.add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
                     let _ = parked.send(());
                     gst::PadProbeReturn::Ok
                 });
@@ -946,6 +973,7 @@ impl Broadcast {
                 if let Some(peer) = head_src.peer() {
                     let _ = head_src.unlink(&peer);
                 }
+                parked_probe = probe.map(|probe| (head_src, probe));
             }
             // Null downstream-first: flushing the probe's own pad releases
             // the parked streaming thread (a FLUSHING return pauses a source
@@ -954,29 +982,19 @@ impl Broadcast {
             for element in old_head.iter().rev() {
                 let _ = element.set_state(gst::State::Null);
             }
+            gst::Element::unlink_many(&old_head);
             let _ = self.pipeline.remove_many(&old_head);
-
-            let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
-            self.pipeline
-                .add_many(&new_head)
-                .map_err(|error| BroadcastError::Start(error.to_string()))?;
-            gst::Element::link_many(&new_head).map_err(start_error)?;
-            new_head
-                .last()
-                .expect("the source head is never empty")
-                .link(&self.tail)
-                .map_err(start_error)?;
-            wire_caps_notify(
+            if let Some((pad, probe)) = parked_probe {
+                pad.remove_probe(probe);
+            }
+            if let Err(error) = activate_source_head(
+                &self.pipeline,
+                &self.tail,
+                &old_head,
                 &new_head,
-                &self.normalize,
-                raw_format,
-                self.capture_ceiling,
-                self.frame_rate,
-            )?;
-            for element in new_head.iter().rev() {
-                element
-                    .sync_state_with_parent()
-                    .map_err(|error| BroadcastError::Start(error.to_string()))?;
+            ) {
+                *head = old_head;
+                return Err(error);
             }
             *head = new_head;
         }
@@ -1010,7 +1028,10 @@ impl Broadcast {
             .lock()
             .expect("leg name lock")
             .clear();
-        if let Some(head_src) = old_head.last().and_then(|element| element.static_pad("src")) {
+        if let Some(head_src) = old_head
+            .last()
+            .and_then(|element| element.static_pad("src"))
+        {
             // Same parking dance as the video head: the streaming thread must
             // be off the tail before anything is unlinked.
             let (parked, wait_parked) = std::sync::mpsc::channel::<()>();
@@ -1034,7 +1055,11 @@ impl Broadcast {
         // back from idle resumes the reconciled mix, not the one from start.
         let audio_config = match &self.audio_config {
             AudioCapture::Streams { .. } => AudioCapture::Streams {
-                targets: self.audio_targets.lock().expect("audio target lock").clone(),
+                targets: self
+                    .audio_targets
+                    .lock()
+                    .expect("audio target lock")
+                    .clone(),
             },
             other => other.clone(),
         };
@@ -1151,8 +1176,7 @@ impl Broadcast {
             match build_stream_leg(&self.pipeline, &mix.mixer, target) {
                 Ok(leg) => {
                     {
-                        let mut names =
-                            self.shared.audio_leg_names.lock().expect("leg name lock");
+                        let mut names = self.shared.audio_leg_names.lock().expect("leg name lock");
                         for element in &leg {
                             names.insert(element.name().to_string());
                         }
@@ -1211,7 +1235,9 @@ impl Broadcast {
             && (gst::ElementFactory::find("claritygccbwe").is_some()
                 || gst::ElementFactory::find("rtpgccbwe").is_some());
         if encoding.adaptive && !adaptive_bwe {
-            tracing::warn!("no GCC bandwidth estimator is available; this viewer holds a fixed bitrate");
+            tracing::warn!(
+                "no GCC bandwidth estimator is available; this viewer holds a fixed bitrate"
+            );
         }
         let initial_kbps = if adaptive_bwe {
             start_video_kbps(encoding.bitrate_kbps)
@@ -1501,8 +1527,7 @@ impl Broadcast {
                     let offered = Arc::new(AtomicBool::new(false));
                     let offered_hook = Arc::clone(&offered);
                     pad.connect_notify(Some("caps"), move |pad, _| {
-                        if pad.current_caps().is_none()
-                            || offered_hook.swap(true, Ordering::SeqCst)
+                        if pad.current_caps().is_none() || offered_hook.swap(true, Ordering::SeqCst)
                         {
                             return;
                         }
@@ -1510,9 +1535,7 @@ impl Broadcast {
                     });
                     // The caps can land between linking and connecting the
                     // handler; offer now if they already did.
-                    if pad.current_caps().is_some()
-                        && !offered.swap(true, Ordering::SeqCst)
-                    {
+                    if pad.current_caps().is_some() && !offered.swap(true, Ordering::SeqCst) {
                         negotiate(&webrtc, &self.shared, peer_id, false);
                     }
                 }
@@ -1521,7 +1544,9 @@ impl Broadcast {
                     *entry.rate_target.lock().expect("rate target lock") =
                         Some((codec, encoder.clone()));
                     entry.branch.retain(|element| !old.contains(element));
-                    entry.branch.extend(installed.branch_elements.iter().cloned());
+                    entry
+                        .branch
+                        .extend(installed.branch_elements.iter().cloned());
                     entry.encode = elements;
                     entry.codec = codec;
                     if let Some(valve) = installed.valve {
@@ -1750,6 +1775,10 @@ impl Broadcast {
     /// Sends a chat message to every viewer over their data channels. Messages
     /// to a viewer whose channel is not yet open are dropped.
     pub fn send_chat(&self, text: &str) {
+        if ChatMessage::from_json(text).is_none() {
+            tracing::warn!("dropping an invalid outbound chat payload");
+            return;
+        }
         let viewers = self.shared.viewers.lock().expect("viewer lock");
         for entry in viewers.values() {
             send_chat_string(entry.chat.as_ref(), text);
@@ -2055,7 +2084,7 @@ fn create_chat_channel(
 /// viewer cannot speak as the presenter or another viewer. A payload that is
 /// not a `ChatMessage` envelope is dropped, matching the web hub.
 fn relay_chat(shared: &Arc<Shared>, from: &str, text: &str) {
-    let Ok(message) = serde_json::from_str::<ChatMessage>(text) else {
+    let Some(message) = ChatMessage::from_json(text) else {
         tracing::warn!(viewer = %from, "dropping a chat payload that is not a ChatMessage envelope");
         return;
     };
@@ -2066,11 +2095,14 @@ fn relay_chat(shared: &Arc<Shared>, from: &str, text: &str) {
         .get(from)
         .cloned()
         .unwrap_or_else(|| "Viewer".to_owned());
-    let stamped = serde_json::to_string(&ChatMessage {
+    let Some(stamped) = (ChatMessage {
         sender,
         text: message.text,
     })
-    .expect("chat messages always serialize");
+    .to_json() else {
+        tracing::warn!(viewer = %from, "dropping a chat payload whose stamped envelope is too large");
+        return;
+    };
     {
         let viewers = shared.viewers.lock().expect("viewer lock");
         for (peer, entry) in viewers.iter() {
@@ -2086,12 +2118,20 @@ fn relay_chat(shared: &Arc<Shared>, from: &str, text: &str) {
 }
 
 /// Sends `text` on a data channel when it is open, ignoring it otherwise.
-fn send_chat_string(channel: Option<&gst_webrtc::WebRTCDataChannel>, text: &str) {
+pub(crate) fn send_chat_string(channel: Option<&gst_webrtc::WebRTCDataChannel>, text: &str) {
     if let Some(channel) = channel
         && channel.ready_state() == gst_webrtc::WebRTCDataChannelState::Open
+        && text.len() <= CHAT_MAX_PAYLOAD_BYTES
+        && chat_send_fits_buffer(channel.buffered_amount(), text.len())
     {
         channel.send_string(Some(text));
     }
+}
+
+fn chat_send_fits_buffer(buffered_amount: u64, payload_bytes: usize) -> bool {
+    u64::try_from(payload_bytes).is_ok_and(|payload_bytes| {
+        buffered_amount <= CHAT_MAX_BUFFERED_BYTES.saturating_sub(payload_bytes)
+    })
 }
 
 fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_restart: bool) {
@@ -2200,24 +2240,22 @@ fn dismantle_viewer(
     let audio_tee_pad = entry.audio_tee_pad.clone();
     // Detach the audio tap once the video tap is off (or immediately for a
     // viewer whose answer never attached a video branch), then dismantle.
-    let after_video = move || {
-        match (&audio_tee, &audio_tee_pad) {
-            (Some(audio_tee), Some(audio_pad)) => {
-                let shared = Arc::clone(&shared);
-                let pipeline = pipeline.clone();
-                let branch = branch.clone();
-                let audio_tee = audio_tee.clone();
-                audio_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
-                    if let Some(peer) = pad.peer() {
-                        let _ = pad.unlink(&peer);
-                    }
-                    audio_tee.release_request_pad(pad);
-                    finish_dismantle(&shared, &pipeline, &branch);
-                    gst::PadProbeReturn::Remove
-                });
-            }
-            _ => finish_dismantle(&shared, &pipeline, &branch),
+    let after_video = move || match (&audio_tee, &audio_tee_pad) {
+        (Some(audio_tee), Some(audio_pad)) => {
+            let shared = Arc::clone(&shared);
+            let pipeline = pipeline.clone();
+            let branch = branch.clone();
+            let audio_tee = audio_tee.clone();
+            audio_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
+                if let Some(peer) = pad.peer() {
+                    let _ = pad.unlink(&peer);
+                }
+                audio_tee.release_request_pad(pad);
+                finish_dismantle(&shared, &pipeline, &branch);
+                gst::PadProbeReturn::Remove
+            });
         }
+        _ => finish_dismantle(&shared, &pipeline, &branch),
     };
     match &entry.tee_pad {
         Some(tee_pad) => {
@@ -2232,6 +2270,78 @@ fn dismantle_viewer(
         }
         None => after_video(),
     }
+}
+
+/// Stops, unlinks, and removes a prepared source head. Safe for partially-added
+/// heads, so preflight and activation failures share one cleanup path.
+fn remove_source_head(pipeline: &gst::Pipeline, head: &[gst::Element]) {
+    if let Some(src) = head.last().and_then(|element| element.static_pad("src"))
+        && let Some(peer) = src.peer()
+    {
+        let _ = src.unlink(&peer);
+    }
+    for element in head.iter().rev() {
+        let _ = element.set_state(gst::State::Null);
+    }
+    gst::Element::unlink_many(head);
+    for element in head.iter().rev() {
+        let _ = pipeline.remove(element);
+    }
+}
+
+/// Activates a preflighted replacement, restoring `old_head` if linking or
+/// state synchronization fails after the old source has been detached.
+fn activate_source_head(
+    pipeline: &gst::Pipeline,
+    tail: &gst::Element,
+    old_head: &[gst::Element],
+    new_head: &[gst::Element],
+) -> Result<(), BroadcastError> {
+    let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
+    let activation = (|| -> Result<(), BroadcastError> {
+        new_head
+            .last()
+            .expect("the source head is never empty")
+            .link(tail)
+            .map_err(start_error)?;
+        for element in new_head.iter().rev() {
+            element
+                .sync_state_with_parent()
+                .map_err(|error| BroadcastError::Start(error.to_string()))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = activation {
+        remove_source_head(pipeline, new_head);
+        if let Err(rollback) = restore_source_head(pipeline, tail, old_head) {
+            return Err(BroadcastError::Start(format!(
+                "{error}; restoring the previous source also failed: {rollback}"
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Reinstalls the previous head after activation of its replacement failed.
+fn restore_source_head(
+    pipeline: &gst::Pipeline,
+    tail: &gst::Element,
+    head: &[gst::Element],
+) -> Result<(), BroadcastError> {
+    let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
+    pipeline.add_many(head).map_err(start_error)?;
+    gst::Element::link_many(head).map_err(start_error)?;
+    head.last()
+        .expect("the source head is never empty")
+        .link(tail)
+        .map_err(start_error)?;
+    for element in head.iter().rev() {
+        element
+            .sync_state_with_parent()
+            .map_err(|error| BroadcastError::Start(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Builds the replaceable capture-side element chain for one source and
@@ -2376,14 +2486,15 @@ fn error_scope(shared: &Shared, source: Option<&gst::Object>) -> ErrorScope {
     let mut current = source.cloned();
     while let Some(object) = current {
         if let Some(element) = object.downcast_ref::<gst::Element>() {
-            let owner = shared
-                .viewers
-                .lock()
-                .expect("viewer lock")
-                .iter()
-                .find_map(|(peer_id, entry)| {
-                    entry.branch.contains(element).then(|| peer_id.clone())
-                });
+            let owner =
+                shared
+                    .viewers
+                    .lock()
+                    .expect("viewer lock")
+                    .iter()
+                    .find_map(|(peer_id, entry)| {
+                        entry.branch.contains(element).then(|| peer_id.clone())
+                    });
             if let Some(peer_id) = owner {
                 return ErrorScope::Viewer(peer_id);
             }
@@ -2585,7 +2696,9 @@ fn negotiated_video_codec(
     answer: &gst_sdp::SDPMessage,
     codecs: &[VideoCodec],
 ) -> Option<(u32, VideoCodec)> {
-    let media = answer.medias().find(|media| media.media() == Some("video"))?;
+    let media = answer
+        .medias()
+        .find(|media| media.media() == Some("video"))?;
     if media.port() == 0 {
         return None;
     }
@@ -2616,8 +2729,8 @@ fn negotiated_video_codec(
 /// Narrows the video transceiver's preferences to the negotiated codec so
 /// later re-offers (ICE restarts, source changes) keep it stable.
 fn narrow_codec_preferences(webrtc: &gst::Element, codec: VideoCodec, pt: u32) {
-    if let Some(transceiver) = webrtc
-        .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>("get-transceiver", &[&0i32])
+    if let Some(transceiver) =
+        webrtc.emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>("get-transceiver", &[&0i32])
     {
         let mut caps = gst::Caps::new_empty();
         caps.get_mut()
@@ -2683,7 +2796,10 @@ fn wire_gcc_bwe(
         let sampler = std::sync::Mutex::new(SendRateSampler::new());
         bwe.connect_notify(Some("estimated-bitrate"), move |bwe, _| {
             let estimate = bwe.property::<u32>("estimated-bitrate");
-            let estimate_kbps = estimate.saturating_sub(audio_bps).max(VIDEO_MIN_KBPS * 1000) / 1000;
+            let estimate_kbps = estimate
+                .saturating_sub(audio_bps)
+                .max(VIDEO_MIN_KBPS * 1000)
+                / 1000;
             let command = if vendored {
                 // The element holds its estimate through application-limited
                 // periods and re-measures on exit, so the estimate is current
@@ -3043,7 +3159,8 @@ mod tests {
 
     #[test]
     fn scales_common_sources_into_the_ceiling() {
-        let fit = |width, height| fit_within_capture_ceiling(width, height, DEFAULT_CAPTURE_CEILING);
+        let fit =
+            |width, height| fit_within_capture_ceiling(width, height, DEFAULT_CAPTURE_CEILING);
         // 4K scales to the ceiling.
         assert_eq!(fit(3840, 2160), (2560, 1440));
         // 16:10 is limited by height, preserving aspect.
@@ -3071,6 +3188,57 @@ mod tests {
         assert_eq!(
             fit_within_capture_ceiling(1280, 720, (1920, 1080)),
             (1280, 720)
+        );
+    }
+
+    #[test]
+    fn chat_send_budget_includes_the_pending_payload() {
+        let payload_bytes =
+            u64::try_from(CHAT_MAX_PAYLOAD_BYTES).expect("chat payload limit fits u64");
+        assert!(chat_send_fits_buffer(
+            CHAT_MAX_BUFFERED_BYTES - payload_bytes,
+            CHAT_MAX_PAYLOAD_BYTES,
+        ));
+        assert!(!chat_send_fits_buffer(
+            CHAT_MAX_BUFFERED_BYTES - payload_bytes + 1,
+            CHAT_MAX_PAYLOAD_BYTES,
+        ));
+        assert!(!chat_send_fits_buffer(CHAT_MAX_BUFFERED_BYTES + 1, 0));
+    }
+
+    #[test]
+    fn failed_source_activation_restores_the_previous_head() {
+        if crate::playback::ensure_gstreamer().is_err() {
+            return;
+        }
+        let make = |name| {
+            gst::ElementFactory::make(name)
+                .build()
+                .unwrap_or_else(|_| panic!("{name} is available"))
+        };
+        let pipeline = gst::Pipeline::new();
+        let old_head = vec![make("audiotestsrc"), make("capsfilter")];
+        let new_head = vec![make("videotestsrc"), make("capsfilter")];
+        let tail = make("audioconvert");
+        let sink = make("fakesink");
+        pipeline
+            .add_many([&old_head[0], &old_head[1], &new_head[0], &new_head[1], &tail, &sink])
+            .expect("add test elements");
+        gst::Element::link_many(&old_head).expect("link old head");
+        gst::Element::link_many(&new_head).expect("link new head");
+        old_head[1].link(&tail).expect("link old head to audio tail");
+        tail.link(&sink).expect("link audio tail");
+
+        old_head[1].unlink(&tail);
+        gst::Element::unlink_many(&old_head);
+        pipeline.remove_many(&old_head).expect("detach old head");
+
+        assert!(activate_source_head(&pipeline, &tail, &old_head, &new_head).is_err());
+        assert!(old_head.iter().all(|element| element.parent().is_some()));
+        assert!(new_head.iter().all(|element| element.parent().is_none()));
+        assert_eq!(
+            old_head[1].static_pad("src").and_then(|pad| pad.peer()),
+            tail.static_pad("sink")
         );
     }
 

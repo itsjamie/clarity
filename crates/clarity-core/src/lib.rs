@@ -16,8 +16,9 @@ pub use presence::{
     verify_identity_for_hosts,
 };
 pub use room::{
-    AuthOutcome, CreateRoomOutcome, DEFAULT_APPROVAL_VIEWERS, DEFAULT_PUBLIC_VIEWERS, DomainError,
-    MAXIMUM_VIEWERS_LIMIT, RoomActorConfig, RoomCommand, RoomEvent, RoomRegistry, RoomState,
-    RoutedSignal, SessionHandle, SignalingAuthorizationService, sanitize_display_name,
+    AuthOutcome, ConnectionIdentity, CreateRoomOutcome, DEFAULT_APPROVAL_VIEWERS,
+    DEFAULT_PUBLIC_VIEWERS, DomainError, MAXIMUM_VIEWERS_LIMIT, RoomActorConfig, RoomCommand,
+    RoomEvent, RoomRegistry, RoomState, RoutedSignal, SessionHandle,
+    SignalingAuthorizationService, sanitize_display_name,
 };
 pub use turn::{TurnConfig, TurnCredentialService};

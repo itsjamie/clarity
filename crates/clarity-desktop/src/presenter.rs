@@ -29,7 +29,9 @@ use secrecy::SecretString;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use url::Url;
 
-use crate::state::{ChatMessage, JoinRequest, PresenterView, RoomCountdown, ViewerCard};
+use crate::state::{
+    ChatMessage, JoinRequest, PresenterView, RoomCountdown, ViewerCard, push_chat_message,
+};
 
 /// What the presenter shares.
 #[derive(Clone, Copy)]
@@ -103,11 +105,22 @@ enum Event {
     Expiry(u64),
     Reconnecting(bool),
     JoinRequested(JoinRequest),
-    ViewerJoined { peer_id: String, name: Option<String> },
-    ViewerLeft { peer_id: String },
-    ViewerConnection { peer_id: String, connected: bool },
+    ViewerJoined {
+        peer_id: String,
+        name: Option<String>,
+    },
+    ViewerLeft {
+        peer_id: String,
+    },
+    ViewerConnection {
+        peer_id: String,
+        connected: bool,
+    },
     ViewerStats(String, ViewerCard),
-    Chat { sender: String, text: String },
+    Chat {
+        sender: String,
+        text: String,
+    },
     ShareFailed(String),
     Ended(String),
 }
@@ -251,7 +264,11 @@ impl PresenterLink {
                     let name = std::mem::take(&mut card.name);
                     let connected = card.connected;
                     *card = ViewerCard {
-                        name: if name.is_empty() { "Guest".to_owned() } else { name },
+                        name: if name.is_empty() {
+                            "Guest".to_owned()
+                        } else {
+                            name
+                        },
                         connected,
                         ..stats
                     };
@@ -262,11 +279,14 @@ impl PresenterLink {
                         .sum();
                     view.bitrate_history.record(total);
                 }
-                Event::Chat { sender, text } => view.messages.push(ChatMessage {
-                    from: sender,
-                    text,
-                    own: false,
-                }),
+                Event::Chat { sender, text } => push_chat_message(
+                    &mut view.messages,
+                    ChatMessage {
+                        from: sender,
+                        text,
+                        own: false,
+                    },
+                ),
                 Event::ShareFailed(message) => view.status = message,
                 Event::Ended(reason) => {
                     view.sharing = SharingState::Idle;
@@ -314,7 +334,9 @@ async fn run(
     emit: impl Fn(Event),
 ) {
     let Ok(server) = Url::parse(&config.server) else {
-        emit(Event::Ended("The signaling server URL is not valid.".to_owned()));
+        emit(Event::Ended(
+            "The signaling server URL is not valid.".to_owned(),
+        ));
         return;
     };
 
@@ -337,7 +359,9 @@ async fn run(
         }
     };
     let Ok(endpoints) = server_endpoints(&server) else {
-        emit(Event::Ended("The signaling server URL is not valid.".to_owned()));
+        emit(Event::Ended(
+            "The signaling server URL is not valid.".to_owned(),
+        ));
         return;
     };
     let presenter_secret = SecretString::from(room.presenter_secret);
@@ -426,7 +450,10 @@ fn forward_update(update: PresenterUpdate, emit: &impl Fn(Event)) {
             name: display_name,
             friend_code,
         })),
-        PresenterUpdate::ViewerJoined { peer_id, display_name } => emit(Event::ViewerJoined {
+        PresenterUpdate::ViewerJoined {
+            peer_id,
+            display_name,
+        } => emit(Event::ViewerJoined {
             peer_id,
             name: display_name,
         }),

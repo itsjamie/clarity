@@ -11,6 +11,8 @@ const iceConfiguration: IceConfiguration = {
 describe('presenter connection manager reconfiguration', () => {
   beforeEach(() => {
     FakePeerConnection.instances.length = 0;
+    FakePeerConnection.failDataChannel = false;
+    FakeSender.setParametersGate = null;
     vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
   });
 
@@ -38,6 +40,61 @@ describe('presenter connection manager reconfiguration', () => {
       scaleResolutionDownBy: 1,
     });
     expect(manager.statuses[0]?.profile.id).toBe('motion-high');
+    manager.stopAll();
+  });
+
+  it('rolls every sender back when one viewer rejects a source replacement', async () => {
+    const manager = createManager();
+    const previousTrack = videoTrack('previous');
+    const replacementTrack = videoTrack('replacement');
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.setSource(streamWith(previousTrack));
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+    const [first, second] = FakePeerConnection.instances;
+    second!.videoSender.replaceTrack.mockRejectedValueOnce(new Error('replacement failed'));
+
+    await expect(manager.setSource(streamWith(replacementTrack))).resolves.toEqual(['viewer-2']);
+
+    expect(first!.videoSender.track).toBe(previousTrack);
+    expect(second!.videoSender.track).toBe(previousTrack);
+    expect(first!.videoSender.replaceTrack).toHaveBeenCalledWith(replacementTrack);
+    expect(first!.videoSender.replaceTrack).toHaveBeenLastCalledWith(previousTrack);
+
+    // The manager also retains the previous source for peers created after the
+    // failed operation, rather than committing a split-brain source state.
+    await manager.addApprovedViewer('viewer-3');
+    expect(FakePeerConnection.instances[2]!.videoSender.track).toBe(previousTrack);
+    manager.stopAll();
+  });
+
+  it('renegotiates when rollback removes a newly-added audio sender', async () => {
+    const sendSignal = vi.fn<(message: ClientMessage) => void>();
+    const manager = new PresenterConnectionManager({
+      sendSignal,
+      onStatus: vi.fn(),
+      onChat: vi.fn(),
+      diagnostics: new DiagnosticsCollector(),
+    });
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.setSource(streamWith(videoTrack('previous')));
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+    const [first, second] = FakePeerConnection.instances;
+    second!.videoSender.replaceTrack.mockRejectedValueOnce(new Error('replacement failed'));
+    const offersBefore = sendSignal.mock.calls.filter(
+      ([message]) => message.type === 'signal:offer',
+    ).length;
+
+    await expect(
+      manager.replaceSource(streamWith(videoTrack('replacement'), audioTrack('replacement'))),
+    ).resolves.toEqual(['viewer-2']);
+
+    const offersAfter = sendSignal.mock.calls.filter(
+      ([message]) => message.type === 'signal:offer',
+    ).length;
+    expect(offersAfter).toBe(offersBefore + 2);
+    expect(first!.audioSenders[0]?.track).toBeNull();
     manager.stopAll();
   });
 
@@ -97,6 +154,85 @@ describe('presenter connection manager reconfiguration', () => {
     await manager.setSource(streamWith(videoTrack('first')));
     expect(FakePeerConnection.instances).toHaveLength(1);
     manager.stopAll();
+  });
+
+  it('deduplicates concurrent creation requests for the same viewer', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    await Promise.all([
+      manager.addApprovedViewer('viewer-1'),
+      manager.addApprovedViewer('viewer-1'),
+    ]);
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(manager.statuses).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('makes duplicate callers wait for the shared negotiation', async () => {
+    const gate = deferred();
+    FakeSender.setParametersGate = gate.promise;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const first = manager.addApprovedViewer('viewer-1');
+    await vi.waitFor(() => expect(FakePeerConnection.instances).toHaveLength(1));
+    let duplicateFinished = false;
+    const duplicate = manager.addApprovedViewer('viewer-1').then(() => {
+      duplicateFinished = true;
+    });
+    await Promise.resolve();
+
+    expect(duplicateFinished).toBe(false);
+    gate.resolve();
+    await Promise.all([first, duplicate]);
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('recreates a viewer removed and re-added during in-flight creation', async () => {
+    const gate = deferred();
+    FakeSender.setParametersGate = gate.promise;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const first = manager.addApprovedViewer('viewer-1');
+    await vi.waitFor(() => expect(FakePeerConnection.instances).toHaveLength(1));
+    manager.removeViewer('viewer-1');
+    const readded = manager.addApprovedViewer('viewer-1');
+    gate.resolve();
+    await Promise.all([first, readded]);
+
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(FakePeerConnection.instances[0]?.connectionState).toBe('closed');
+    expect(manager.statuses).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('cancels an in-flight creation when the viewer is removed', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const creating = manager.addApprovedViewer('viewer-1');
+    manager.removeViewer('viewer-1');
+    await creating;
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances[0]!.connectionState).toBe('closed');
+    expect(manager.statuses).toEqual([]);
+    manager.stopAll();
+  });
+
+  it('closes a peer when synchronous channel setup fails', async () => {
+    FakePeerConnection.failDataChannel = true;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    await expect(manager.addApprovedViewer('viewer-1')).rejects.toThrow('channel setup failed');
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances[0]?.connectionState).toBe('closed');
   });
 
   it('re-offers an idle-born peer when the first source arrives, then replaces silently', async () => {
@@ -178,15 +314,19 @@ function createManager(
   });
 }
 
-function streamWith(track: MediaStreamTrack): MediaStream {
+function streamWith(track: MediaStreamTrack, audio?: MediaStreamTrack): MediaStream {
   return {
     getVideoTracks: () => [track],
-    getAudioTracks: () => [],
+    getAudioTracks: () => (audio ? [audio] : []),
   } as unknown as MediaStream;
 }
 
 function videoTrack(id: string): MediaStreamTrack {
   return { id, kind: 'video' } as MediaStreamTrack;
+}
+
+function audioTrack(id: string): MediaStreamTrack {
+  return { id, kind: 'audio' } as MediaStreamTrack;
 }
 
 function activeConnection(): FakePeerConnection {
@@ -196,15 +336,21 @@ function activeConnection(): FakePeerConnection {
 }
 
 class FakeSender {
+  static setParametersGate: Promise<void> | null = null;
+
   readonly setParameters = vi.fn<(parameters: RTCRtpSendParameters) => Promise<void>>(
-    (parameters) => {
+    async (parameters) => {
       this.#parameters = copyParameters(parameters);
-      return Promise.resolve();
+      await FakeSender.setParametersGate;
     },
   );
   readonly replaceTrack = vi.fn<(track: MediaStreamTrack | null) => Promise<void>>(
-    () => Promise.resolve(),
+    (track) => {
+      this.track = track;
+      return Promise.resolve();
+    },
   );
+  public track: MediaStreamTrack | null = null;
   #parameters = { encodings: [{}] } as RTCRtpSendParameters;
 
   public getParameters(): RTCRtpSendParameters {
@@ -216,8 +362,17 @@ class FakeSender {
   }
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
+}
+
 class FakeDataChannel {
   readonly readyState: RTCDataChannelState = 'open';
+  readonly bufferedAmount = 0;
   readonly sent: string[] = [];
   onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
   onopen: (() => void) | null = null;
@@ -235,8 +390,10 @@ class FakeDataChannel {
 
 class FakePeerConnection {
   static readonly instances: FakePeerConnection[] = [];
+  static failDataChannel = false;
 
   readonly videoSender = new FakeSender();
+  readonly audioSenders: FakeSender[] = [];
   chatChannel!: FakeDataChannel;
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
@@ -251,12 +408,25 @@ class FakePeerConnection {
   }
 
   public createDataChannel(label: string): RTCDataChannel {
+    if (FakePeerConnection.failDataChannel) throw new Error('channel setup failed');
     this.chatChannel = new FakeDataChannel(label);
     return this.chatChannel as unknown as RTCDataChannel;
   }
 
-  public addTransceiver(): RTCRtpTransceiver {
+  public addTransceiver(trackOrKind?: MediaStreamTrack | string): RTCRtpTransceiver {
+    this.videoSender.track = typeof trackOrKind === 'string' ? null : trackOrKind ?? null;
     return { sender: this.videoSender } as unknown as RTCRtpTransceiver;
+  }
+
+  public addTrack(track: MediaStreamTrack): RTCRtpSender {
+    const sender = new FakeSender();
+    sender.track = track;
+    this.audioSenders.push(sender);
+    return sender as unknown as RTCRtpSender;
+  }
+
+  public removeTrack(sender: RTCRtpSender): void {
+    (sender as unknown as FakeSender).track = null;
   }
 
   public createOffer(): Promise<RTCSessionDescriptionInit> {

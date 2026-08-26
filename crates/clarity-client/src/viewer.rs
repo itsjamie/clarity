@@ -13,7 +13,7 @@ use secrecy::ExposeSecret;
 use tokio::sync::mpsc;
 
 use crate::invite::Invitation;
-use crate::presenter::chat_envelope;
+use crate::presenter::{chat_envelope, queue_chat};
 use crate::signaling::{
     SessionIdentity, SignalingClient, SignalingConfig, SignalingEvent, SignalingState,
     ice_refresh_delay, ice_refresh_retry, new_request_id,
@@ -282,10 +282,13 @@ impl ViewerSession {
                     .display_name
                     .clone()
                     .unwrap_or_else(|| "Viewer".to_owned());
-                let envelope = chat_envelope(&sender, &text);
-                match &self.playback {
-                    Some(playback) => playback.send_chat(&envelope),
-                    None => self.pending_chat.push(envelope),
+                if let Some(envelope) = chat_envelope(&sender, &text) {
+                    match &self.playback {
+                        Some(playback) => playback.send_chat(&envelope),
+                        None => queue_chat(&mut self.pending_chat, envelope),
+                    }
+                } else {
+                    tracing::warn!("dropping an oversized outbound chat message");
                 }
             }
             ViewerCommand::SetVolume(level) => {
@@ -367,8 +370,8 @@ impl ViewerSession {
                 // origin's session id tells them apart; it is stable across
                 // renegotiations of one connection and fresh for a new one.
                 let session_id = sdp_session_id(&sdp).map(str::to_owned);
-                let same_connection = ice_restart
-                    || (session_id.is_some() && session_id == self.offer_session_id);
+                let same_connection =
+                    ice_restart || (session_id.is_some() && session_id == self.offer_session_id);
                 if !same_connection && self.playback.is_some() {
                     self.finish_playback();
                 }
@@ -473,14 +476,14 @@ impl ViewerSession {
             PlaybackEvent::Stats(stats) => {
                 let _ = self.updates.send(ViewerUpdate::Stats(stats));
             }
-            PlaybackEvent::Chat { text } => match serde_json::from_str::<ChatMessage>(&text) {
-                Ok(chat) => {
+            PlaybackEvent::Chat { text } => match ChatMessage::from_json(&text) {
+                Some(chat) => {
                     let _ = self.updates.send(ViewerUpdate::Chat {
                         sender: chat.sender,
                         text: chat.text,
                     });
                 }
-                Err(_) => {
+                None => {
                     tracing::warn!("dropping a chat payload that is not a ChatMessage envelope");
                 }
             },
@@ -536,7 +539,7 @@ impl ViewerSession {
                 force_relay: self.force_relay,
                 frames: self.frames.clone(),
                 native: self.native,
-        audio_samples: None,
+                audio_samples: None,
             })?;
             if let Some(surface) = playback.native_surface() {
                 let _ = self.updates.send(ViewerUpdate::NativeSurface(surface));

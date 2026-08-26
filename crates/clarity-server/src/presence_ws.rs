@@ -32,6 +32,7 @@ use tracing::debug;
 use crate::{
     AppState,
     app::{AppError, validate_origin},
+    client_ip::client_ip,
     rate_limit::SessionRateLimiter,
 };
 
@@ -42,9 +43,10 @@ pub async fn upgrade(
     websocket: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_origin(&state.config, &headers)?;
+    let client_ip = client_ip(remote, &headers, state.config.trusted_proxy_hops);
     if !state.rate_limits.check(
         "presence-connect",
-        &remote.ip().to_string(),
+        &client_ip.to_string(),
         state.config.websocket_connection_rate_limit,
     ) {
         return Err(AppError::new(

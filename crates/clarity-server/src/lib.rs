@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+mod client_ip;
 pub mod config;
 pub mod presence_ws;
 pub mod rate_limit;

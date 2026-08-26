@@ -7,8 +7,8 @@ use clarity_media::{
     EncoderSettings, FrameSink, SenderStats, SourceConfig, VideoCodecId,
 };
 use clarity_protocol::{
-    ChatMessage, ClientMessage, ErrorCode, PROTOCOL_VERSION, PeerSnapshot, RoomSnapshot,
-    ServerMessage, SharingState,
+    CHAT_MAX_QUEUED_MESSAGES, ChatMessage, ClientMessage, ErrorCode, PROTOCOL_VERSION,
+    PeerSnapshot, RoomSnapshot, ServerMessage, SharingState,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::mpsc;
@@ -415,10 +415,13 @@ impl PresenterSession {
     fn handle_command(&mut self, command: PresenterCommand) -> Option<PresenterEnd> {
         match command {
             PresenterCommand::Chat(text) => {
-                let envelope = chat_envelope(&self.display_name, &text);
-                match &self.broadcast {
-                    Some(broadcast) => broadcast.send_chat(&envelope),
-                    None => self.pending_chat.push(envelope),
+                if let Some(envelope) = chat_envelope(&self.display_name, &text) {
+                    match &self.broadcast {
+                        Some(broadcast) => broadcast.send_chat(&envelope),
+                        None => queue_chat(&mut self.pending_chat, envelope),
+                    }
+                } else {
+                    tracing::warn!("dropping an oversized outbound chat message");
                 }
             }
             PresenterCommand::StartShare(source) | PresenterCommand::SwitchSource(source) => {
@@ -680,20 +683,18 @@ impl PresenterSession {
 
     fn handle_broadcast(&mut self, event: BroadcastEvent) -> Result<(), PresenterError> {
         match event {
-            BroadcastEvent::Chat { peer_id, text } => {
-                match serde_json::from_str::<ChatMessage>(&text) {
-                    Ok(chat) => {
-                        let _ = self.updates.send(PresenterUpdate::Chat {
-                            peer_id,
-                            sender: chat.sender,
-                            text: chat.text,
-                        });
-                    }
-                    Err(_) => {
-                        tracing::warn!(viewer = %peer_id, "dropping a chat payload that is not a ChatMessage envelope");
-                    }
+            BroadcastEvent::Chat { peer_id, text } => match ChatMessage::from_json(&text) {
+                Some(chat) => {
+                    let _ = self.updates.send(PresenterUpdate::Chat {
+                        peer_id,
+                        sender: chat.sender,
+                        text: chat.text,
+                    });
                 }
-            }
+                None => {
+                    tracing::warn!(viewer = %peer_id, "dropping a chat payload that is not a ChatMessage envelope");
+                }
+            },
             BroadcastEvent::Offer {
                 peer_id,
                 sdp,
@@ -915,10 +916,36 @@ impl PresenterSession {
 
 /// Wraps outgoing chat in the protocol's [`ChatMessage`] envelope; the same
 /// JSON shape the web client sends on the `chat` data channel.
-pub(crate) fn chat_envelope(sender: &str, text: &str) -> String {
-    serde_json::to_string(&ChatMessage {
+pub(crate) fn chat_envelope(sender: &str, text: &str) -> Option<String> {
+    ChatMessage {
         sender: sender.to_owned(),
         text: text.to_owned(),
-    })
-    .expect("chat messages always serialize")
+    }
+    .to_json()
+}
+
+pub(crate) fn queue_chat(queue: &mut Vec<String>, envelope: String) {
+    if queue.len() >= CHAT_MAX_QUEUED_MESSAGES {
+        queue.remove(0);
+    }
+    queue.push(envelope);
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+    use clarity_protocol::CHAT_MAX_TEXT_CHARACTERS;
+
+    #[test]
+    fn chat_envelopes_and_pre_connection_queue_are_bounded() {
+        assert!(chat_envelope("June", &"x".repeat(CHAT_MAX_TEXT_CHARACTERS)).is_some());
+        assert!(chat_envelope("June", &"x".repeat(CHAT_MAX_TEXT_CHARACTERS + 1)).is_none());
+
+        let mut queue = Vec::new();
+        for index in 0..=CHAT_MAX_QUEUED_MESSAGES {
+            queue_chat(&mut queue, index.to_string());
+        }
+        assert_eq!(queue.len(), CHAT_MAX_QUEUED_MESSAGES);
+        assert_eq!(queue.first().map(String::as_str), Some("1"));
+    }
 }
