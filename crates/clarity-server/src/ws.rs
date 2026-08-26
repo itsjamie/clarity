@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, time::Instant};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Instant,
+};
 
 use axum::{
     extract::{
@@ -26,6 +29,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     app::{AppError, validate_origin},
+    client_ip::client_ip,
     rate_limit::SessionRateLimiter,
 };
 
@@ -43,9 +47,10 @@ pub async fn upgrade(
     websocket: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_origin(&state.config, &headers)?;
+    let client_ip = client_ip(remote, &headers, state.config.trusted_proxy_hops);
     if !state.rate_limits.check(
         "websocket-connect",
-        &remote.ip().to_string(),
+        &client_ip.to_string(),
         state.config.websocket_connection_rate_limit,
     ) {
         return Err(AppError::new(
@@ -58,11 +63,11 @@ pub async fn upgrade(
     Ok(websocket
         .max_message_size(maximum_size)
         .max_frame_size(maximum_size)
-        .on_upgrade(move |socket| handle_socket(socket, state, remote))
+        .on_upgrade(move |socket| handle_socket(socket, state, client_ip))
         .into_response())
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, remote: SocketAddr) {
+async fn handle_socket(socket: WebSocket, state: AppState, client_ip: IpAddr) {
     let (mut socket_writer, mut socket_reader) = socket.split();
     let (outbound_tx, mut outbound_rx) =
         mpsc::channel::<ServerMessage>(state.config.room_actor.outbound_capacity);
@@ -84,7 +89,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, remote: SocketAddr) {
 
     let authentication = tokio::time::timeout(
         state.config.websocket_auth_timeout,
-        authenticate(&mut socket_reader, &outbound_tx, &state, remote),
+        authenticate(&mut socket_reader, &outbound_tx, &state, client_ip),
     )
     .await;
 
@@ -214,7 +219,7 @@ async fn authenticate(
     reader: &mut futures_util::stream::SplitStream<WebSocket>,
     outbound: &mpsc::Sender<ServerMessage>,
     state: &AppState,
-    remote: SocketAddr,
+    client_ip: IpAddr,
 ) -> Result<AuthenticatedSession, DomainError> {
     let message = match parse_incoming(
         reader.next().await,
@@ -243,7 +248,7 @@ async fn authenticate(
     }
     if !state.rate_limits.check(
         "auth",
-        &remote.ip().to_string(),
+        &client_ip.to_string(),
         state.config.auth_rate_limit,
     ) {
         send_auth_failed(
