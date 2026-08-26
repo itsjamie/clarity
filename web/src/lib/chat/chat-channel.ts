@@ -59,10 +59,11 @@ export interface ChatChannelLike {
 
 /** Sends one bounded payload without allowing a slow peer's SCTP queue to grow indefinitely. */
 export function trySendChatPayload(channel: ChatChannelLike | null, payload: string): boolean {
+  const payloadBytes = chatPayloadBytes(payload);
   if (
     channel?.readyState !== 'open' ||
-    channel.bufferedAmount > CHAT_MAX_BUFFERED_BYTES ||
-    !isBoundedPayload(payload)
+    !isBoundedPayload(payload, payloadBytes) ||
+    channel.bufferedAmount + payloadBytes > CHAT_MAX_BUFFERED_BYTES
   ) {
     return false;
   }
@@ -78,8 +79,8 @@ export function chatPayloadBytes(payload: string): number {
   return encoder.encode(payload).byteLength;
 }
 
-function isBoundedPayload(payload: string): boolean {
-  return payload.length <= CHAT_MAX_PAYLOAD_BYTES && chatPayloadBytes(payload) <= CHAT_MAX_PAYLOAD_BYTES;
+function isBoundedPayload(payload: string, payloadBytes = chatPayloadBytes(payload)): boolean {
+  return payload.length <= CHAT_MAX_PAYLOAD_BYTES && payloadBytes <= CHAT_MAX_PAYLOAD_BYTES;
 }
 
 function hasAtMostCharacters(value: string, maximum: number): boolean {

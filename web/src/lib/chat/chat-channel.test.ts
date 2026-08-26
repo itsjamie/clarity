@@ -3,9 +3,11 @@ import {
   CHAT_MAX_BUFFERED_BYTES,
   CHAT_MAX_PAYLOAD_BYTES,
   CHAT_MAX_TEXT_CHARACTERS,
+  chatPayloadBytes,
   decodeChatMessage,
   encodeChatMessage,
   relayChatPayload,
+  trySendChatPayload,
   type ChatChannelLike,
 } from './chat-channel';
 
@@ -93,6 +95,21 @@ describe('presenter chat relay', () => {
     expect(delivered).toEqual(['viewer-3']);
     expect(backpressured.sent).toEqual([]);
     expect(healthy.sent).toEqual(['payload']);
+  });
+
+  it('never lets one send push the buffered amount over the cap', () => {
+    const payload = encodeChatMessage({ sender: 'June', text: 'hello' });
+    const payloadBytes = chatPayloadBytes(payload);
+    const fitsExactly = new FakeChannel('open', CHAT_MAX_BUFFERED_BYTES - payloadBytes);
+    const exceedsByOne = new FakeChannel(
+      'open',
+      CHAT_MAX_BUFFERED_BYTES - payloadBytes + 1,
+    );
+
+    expect(trySendChatPayload(fitsExactly, payload)).toBe(true);
+    expect(trySendChatPayload(exceedsByOne, payload)).toBe(false);
+    expect(fitsExactly.sent).toEqual([payload]);
+    expect(exceedsByOne.sent).toEqual([]);
   });
 });
 

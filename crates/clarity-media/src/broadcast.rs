@@ -2122,10 +2122,16 @@ pub(crate) fn send_chat_string(channel: Option<&gst_webrtc::WebRTCDataChannel>, 
     if let Some(channel) = channel
         && channel.ready_state() == gst_webrtc::WebRTCDataChannelState::Open
         && text.len() <= CHAT_MAX_PAYLOAD_BYTES
-        && channel.buffered_amount() <= CHAT_MAX_BUFFERED_BYTES
+        && chat_send_fits_buffer(channel.buffered_amount(), text.len())
     {
         channel.send_string(Some(text));
     }
+}
+
+fn chat_send_fits_buffer(buffered_amount: u64, payload_bytes: usize) -> bool {
+    u64::try_from(payload_bytes).is_ok_and(|payload_bytes| {
+        buffered_amount <= CHAT_MAX_BUFFERED_BYTES.saturating_sub(payload_bytes)
+    })
 }
 
 fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_restart: bool) {
@@ -3183,6 +3189,21 @@ mod tests {
             fit_within_capture_ceiling(1280, 720, (1920, 1080)),
             (1280, 720)
         );
+    }
+
+    #[test]
+    fn chat_send_budget_includes_the_pending_payload() {
+        let payload_bytes =
+            u64::try_from(CHAT_MAX_PAYLOAD_BYTES).expect("chat payload limit fits u64");
+        assert!(chat_send_fits_buffer(
+            CHAT_MAX_BUFFERED_BYTES - payload_bytes,
+            CHAT_MAX_PAYLOAD_BYTES,
+        ));
+        assert!(!chat_send_fits_buffer(
+            CHAT_MAX_BUFFERED_BYTES - payload_bytes + 1,
+            CHAT_MAX_PAYLOAD_BYTES,
+        ));
+        assert!(!chat_send_fits_buffer(CHAT_MAX_BUFFERED_BYTES + 1, 0));
     }
 
     #[test]
