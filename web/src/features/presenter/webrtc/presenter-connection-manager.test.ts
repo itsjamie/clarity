@@ -372,6 +372,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 
 class FakeDataChannel {
   readonly readyState: RTCDataChannelState = 'open';
+  readonly bufferedAmount = 0;
   readonly sent: string[] = [];
   onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
   onopen: (() => void) | null = null;

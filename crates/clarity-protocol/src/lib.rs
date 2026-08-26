@@ -602,6 +602,45 @@ pub struct ChatMessage {
     pub text: String,
 }
 
+/// Maximum number of Unicode scalar values accepted in a chat sender label.
+pub const CHAT_MAX_SENDER_CHARACTERS: usize = 48;
+/// Maximum number of Unicode scalar values accepted in one chat message.
+pub const CHAT_MAX_TEXT_CHARACTERS: usize = 2_000;
+/// Maximum encoded JSON envelope size accepted on the chat data channel.
+pub const CHAT_MAX_PAYLOAD_BYTES: usize = 8 * 1_024;
+/// Maximum messages retained while a chat data channel is not ready.
+pub const CHAT_MAX_QUEUED_MESSAGES: usize = 32;
+/// Maximum per-peer SCTP backlog accepted before new chat is dropped.
+pub const CHAT_MAX_BUFFERED_BYTES: u64 = 64 * 1_024;
+
+impl ChatMessage {
+    /// Whether both user-controlled strings fit the interoperable chat limits.
+    pub fn is_within_limits(&self) -> bool {
+        self.sender.chars().count() <= CHAT_MAX_SENDER_CHARACTERS
+            && self.text.chars().count() <= CHAT_MAX_TEXT_CHARACTERS
+    }
+
+    /// Parses a bounded chat envelope, rejecting oversized input before JSON
+    /// allocation and validating the decoded strings afterward.
+    pub fn from_json(payload: &str) -> Option<Self> {
+        if payload.len() > CHAT_MAX_PAYLOAD_BYTES {
+            return None;
+        }
+        let message = serde_json::from_str::<Self>(payload).ok()?;
+        message.is_within_limits().then_some(message)
+    }
+
+    /// Serializes this message only when both the decoded and encoded limits
+    /// are satisfied.
+    pub fn to_json(&self) -> Option<String> {
+        if !self.is_within_limits() {
+            return None;
+        }
+        let payload = serde_json::to_string(self).ok()?;
+        (payload.len() <= CHAT_MAX_PAYLOAD_BYTES).then_some(payload)
+    }
+}
+
 /// A room a friend is currently hosting, surfaced to their online friends so
 /// they can join. The `viewer_url` carries the viewer secret in its fragment,
 /// exactly as returned by room creation.
@@ -791,7 +830,33 @@ mod tests {
             text: "hello".into(),
         })
         .expect("serializes");
-        assert_eq!(value, serde_json::json!({ "sender": "Jamie", "text": "hello" }));
+        assert_eq!(
+            value,
+            serde_json::json!({ "sender": "Jamie", "text": "hello" })
+        );
+    }
+
+    #[test]
+    fn chat_messages_reject_oversized_text_and_payloads() {
+        let valid = ChatMessage {
+            sender: "June".to_owned(),
+            text: "👋".repeat(CHAT_MAX_TEXT_CHARACTERS),
+        };
+        let encoded = valid.to_json().expect("valid bounded message");
+        assert_eq!(ChatMessage::from_json(&encoded), Some(valid));
+
+        let oversized_text = ChatMessage {
+            sender: "June".to_owned(),
+            text: "x".repeat(CHAT_MAX_TEXT_CHARACTERS + 1),
+        };
+        assert!(oversized_text.to_json().is_none());
+        assert!(
+            ChatMessage::from_json(&format!(
+                "{{\"sender\":\"June\",\"text\":\"{}\"}}",
+                "x".repeat(CHAT_MAX_PAYLOAD_BYTES)
+            ))
+            .is_none()
+        );
     }
 
     #[test]

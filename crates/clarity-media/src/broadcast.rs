@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clarity_protocol::{ChatMessage, IceConfiguration};
+use clarity_protocol::{
+    CHAT_MAX_BUFFERED_BYTES, CHAT_MAX_PAYLOAD_BYTES, ChatMessage, IceConfiguration,
+};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_sdp as gst_sdp;
@@ -158,7 +160,10 @@ impl VideoCodec {
     /// the codec every WebRTC endpoint must decode.
     fn resolve_ranking(ranking: &[VideoCodecId]) -> Vec<Self> {
         let ranked: Vec<Self> = if ranking.is_empty() {
-            VideoCodecId::ALL.iter().map(|id| Self::from_id(*id)).collect()
+            VideoCodecId::ALL
+                .iter()
+                .map(|id| Self::from_id(*id))
+                .collect()
         } else {
             ranking.iter().map(|id| Self::from_id(*id)).collect()
         };
@@ -853,9 +858,9 @@ impl Broadcast {
                 .add_many(&preview)
                 .map_err(|error| BroadcastError::Start(error.to_string()))?;
             gst::Element::link_many(&preview).map_err(start_error)?;
-            let tee_pad = tee
-                .request_pad_simple("src_%u")
-                .ok_or_else(|| BroadcastError::Start("the preview tee pad is unavailable".into()))?;
+            let tee_pad = tee.request_pad_simple("src_%u").ok_or_else(|| {
+                BroadcastError::Start("the preview tee pad is unavailable".into())
+            })?;
             let queue_sink = preview[0]
                 .static_pad("sink")
                 .ok_or_else(|| BroadcastError::Start("the preview queue has no sink".into()))?;
@@ -893,8 +898,7 @@ impl Broadcast {
             .map_err(|error| BroadcastError::Start(error.to_string()))?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let bus_thread =
-            spawn_bus_thread(&pipeline, &tee, audio_tee.as_ref(), &shared, &shutdown)?;
+        let bus_thread = spawn_bus_thread(&pipeline, &tee, audio_tee.as_ref(), &shared, &shutdown)?;
 
         Ok((
             Self {
@@ -1024,7 +1028,10 @@ impl Broadcast {
             .lock()
             .expect("leg name lock")
             .clear();
-        if let Some(head_src) = old_head.last().and_then(|element| element.static_pad("src")) {
+        if let Some(head_src) = old_head
+            .last()
+            .and_then(|element| element.static_pad("src"))
+        {
             // Same parking dance as the video head: the streaming thread must
             // be off the tail before anything is unlinked.
             let (parked, wait_parked) = std::sync::mpsc::channel::<()>();
@@ -1048,7 +1055,11 @@ impl Broadcast {
         // back from idle resumes the reconciled mix, not the one from start.
         let audio_config = match &self.audio_config {
             AudioCapture::Streams { .. } => AudioCapture::Streams {
-                targets: self.audio_targets.lock().expect("audio target lock").clone(),
+                targets: self
+                    .audio_targets
+                    .lock()
+                    .expect("audio target lock")
+                    .clone(),
             },
             other => other.clone(),
         };
@@ -1165,8 +1176,7 @@ impl Broadcast {
             match build_stream_leg(&self.pipeline, &mix.mixer, target) {
                 Ok(leg) => {
                     {
-                        let mut names =
-                            self.shared.audio_leg_names.lock().expect("leg name lock");
+                        let mut names = self.shared.audio_leg_names.lock().expect("leg name lock");
                         for element in &leg {
                             names.insert(element.name().to_string());
                         }
@@ -1225,7 +1235,9 @@ impl Broadcast {
             && (gst::ElementFactory::find("claritygccbwe").is_some()
                 || gst::ElementFactory::find("rtpgccbwe").is_some());
         if encoding.adaptive && !adaptive_bwe {
-            tracing::warn!("no GCC bandwidth estimator is available; this viewer holds a fixed bitrate");
+            tracing::warn!(
+                "no GCC bandwidth estimator is available; this viewer holds a fixed bitrate"
+            );
         }
         let initial_kbps = if adaptive_bwe {
             start_video_kbps(encoding.bitrate_kbps)
@@ -1515,8 +1527,7 @@ impl Broadcast {
                     let offered = Arc::new(AtomicBool::new(false));
                     let offered_hook = Arc::clone(&offered);
                     pad.connect_notify(Some("caps"), move |pad, _| {
-                        if pad.current_caps().is_none()
-                            || offered_hook.swap(true, Ordering::SeqCst)
+                        if pad.current_caps().is_none() || offered_hook.swap(true, Ordering::SeqCst)
                         {
                             return;
                         }
@@ -1524,9 +1535,7 @@ impl Broadcast {
                     });
                     // The caps can land between linking and connecting the
                     // handler; offer now if they already did.
-                    if pad.current_caps().is_some()
-                        && !offered.swap(true, Ordering::SeqCst)
-                    {
+                    if pad.current_caps().is_some() && !offered.swap(true, Ordering::SeqCst) {
                         negotiate(&webrtc, &self.shared, peer_id, false);
                     }
                 }
@@ -1535,7 +1544,9 @@ impl Broadcast {
                     *entry.rate_target.lock().expect("rate target lock") =
                         Some((codec, encoder.clone()));
                     entry.branch.retain(|element| !old.contains(element));
-                    entry.branch.extend(installed.branch_elements.iter().cloned());
+                    entry
+                        .branch
+                        .extend(installed.branch_elements.iter().cloned());
                     entry.encode = elements;
                     entry.codec = codec;
                     if let Some(valve) = installed.valve {
@@ -1764,6 +1775,10 @@ impl Broadcast {
     /// Sends a chat message to every viewer over their data channels. Messages
     /// to a viewer whose channel is not yet open are dropped.
     pub fn send_chat(&self, text: &str) {
+        if ChatMessage::from_json(text).is_none() {
+            tracing::warn!("dropping an invalid outbound chat payload");
+            return;
+        }
         let viewers = self.shared.viewers.lock().expect("viewer lock");
         for entry in viewers.values() {
             send_chat_string(entry.chat.as_ref(), text);
@@ -2069,7 +2084,7 @@ fn create_chat_channel(
 /// viewer cannot speak as the presenter or another viewer. A payload that is
 /// not a `ChatMessage` envelope is dropped, matching the web hub.
 fn relay_chat(shared: &Arc<Shared>, from: &str, text: &str) {
-    let Ok(message) = serde_json::from_str::<ChatMessage>(text) else {
+    let Some(message) = ChatMessage::from_json(text) else {
         tracing::warn!(viewer = %from, "dropping a chat payload that is not a ChatMessage envelope");
         return;
     };
@@ -2080,11 +2095,14 @@ fn relay_chat(shared: &Arc<Shared>, from: &str, text: &str) {
         .get(from)
         .cloned()
         .unwrap_or_else(|| "Viewer".to_owned());
-    let stamped = serde_json::to_string(&ChatMessage {
+    let Some(stamped) = (ChatMessage {
         sender,
         text: message.text,
     })
-    .expect("chat messages always serialize");
+    .to_json() else {
+        tracing::warn!(viewer = %from, "dropping a chat payload whose stamped envelope is too large");
+        return;
+    };
     {
         let viewers = shared.viewers.lock().expect("viewer lock");
         for (peer, entry) in viewers.iter() {
@@ -2100,12 +2118,20 @@ fn relay_chat(shared: &Arc<Shared>, from: &str, text: &str) {
 }
 
 /// Sends `text` on a data channel when it is open, ignoring it otherwise.
-fn send_chat_string(channel: Option<&gst_webrtc::WebRTCDataChannel>, text: &str) {
+pub(crate) fn send_chat_string(channel: Option<&gst_webrtc::WebRTCDataChannel>, text: &str) {
     if let Some(channel) = channel
         && channel.ready_state() == gst_webrtc::WebRTCDataChannelState::Open
+        && text.len() <= CHAT_MAX_PAYLOAD_BYTES
+        && chat_send_fits_buffer(channel.buffered_amount(), text.len())
     {
         channel.send_string(Some(text));
     }
+}
+
+fn chat_send_fits_buffer(buffered_amount: u64, payload_bytes: usize) -> bool {
+    u64::try_from(payload_bytes).is_ok_and(|payload_bytes| {
+        buffered_amount <= CHAT_MAX_BUFFERED_BYTES.saturating_sub(payload_bytes)
+    })
 }
 
 fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_restart: bool) {
@@ -2214,24 +2240,22 @@ fn dismantle_viewer(
     let audio_tee_pad = entry.audio_tee_pad.clone();
     // Detach the audio tap once the video tap is off (or immediately for a
     // viewer whose answer never attached a video branch), then dismantle.
-    let after_video = move || {
-        match (&audio_tee, &audio_tee_pad) {
-            (Some(audio_tee), Some(audio_pad)) => {
-                let shared = Arc::clone(&shared);
-                let pipeline = pipeline.clone();
-                let branch = branch.clone();
-                let audio_tee = audio_tee.clone();
-                audio_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
-                    if let Some(peer) = pad.peer() {
-                        let _ = pad.unlink(&peer);
-                    }
-                    audio_tee.release_request_pad(pad);
-                    finish_dismantle(&shared, &pipeline, &branch);
-                    gst::PadProbeReturn::Remove
-                });
-            }
-            _ => finish_dismantle(&shared, &pipeline, &branch),
+    let after_video = move || match (&audio_tee, &audio_tee_pad) {
+        (Some(audio_tee), Some(audio_pad)) => {
+            let shared = Arc::clone(&shared);
+            let pipeline = pipeline.clone();
+            let branch = branch.clone();
+            let audio_tee = audio_tee.clone();
+            audio_pad.add_probe(gst::PadProbeType::IDLE, move |pad, _| {
+                if let Some(peer) = pad.peer() {
+                    let _ = pad.unlink(&peer);
+                }
+                audio_tee.release_request_pad(pad);
+                finish_dismantle(&shared, &pipeline, &branch);
+                gst::PadProbeReturn::Remove
+            });
         }
+        _ => finish_dismantle(&shared, &pipeline, &branch),
     };
     match &entry.tee_pad {
         Some(tee_pad) => {
@@ -2462,14 +2486,15 @@ fn error_scope(shared: &Shared, source: Option<&gst::Object>) -> ErrorScope {
     let mut current = source.cloned();
     while let Some(object) = current {
         if let Some(element) = object.downcast_ref::<gst::Element>() {
-            let owner = shared
-                .viewers
-                .lock()
-                .expect("viewer lock")
-                .iter()
-                .find_map(|(peer_id, entry)| {
-                    entry.branch.contains(element).then(|| peer_id.clone())
-                });
+            let owner =
+                shared
+                    .viewers
+                    .lock()
+                    .expect("viewer lock")
+                    .iter()
+                    .find_map(|(peer_id, entry)| {
+                        entry.branch.contains(element).then(|| peer_id.clone())
+                    });
             if let Some(peer_id) = owner {
                 return ErrorScope::Viewer(peer_id);
             }
@@ -2671,7 +2696,9 @@ fn negotiated_video_codec(
     answer: &gst_sdp::SDPMessage,
     codecs: &[VideoCodec],
 ) -> Option<(u32, VideoCodec)> {
-    let media = answer.medias().find(|media| media.media() == Some("video"))?;
+    let media = answer
+        .medias()
+        .find(|media| media.media() == Some("video"))?;
     if media.port() == 0 {
         return None;
     }
@@ -2702,8 +2729,8 @@ fn negotiated_video_codec(
 /// Narrows the video transceiver's preferences to the negotiated codec so
 /// later re-offers (ICE restarts, source changes) keep it stable.
 fn narrow_codec_preferences(webrtc: &gst::Element, codec: VideoCodec, pt: u32) {
-    if let Some(transceiver) = webrtc
-        .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>("get-transceiver", &[&0i32])
+    if let Some(transceiver) =
+        webrtc.emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>("get-transceiver", &[&0i32])
     {
         let mut caps = gst::Caps::new_empty();
         caps.get_mut()
@@ -2769,7 +2796,10 @@ fn wire_gcc_bwe(
         let sampler = std::sync::Mutex::new(SendRateSampler::new());
         bwe.connect_notify(Some("estimated-bitrate"), move |bwe, _| {
             let estimate = bwe.property::<u32>("estimated-bitrate");
-            let estimate_kbps = estimate.saturating_sub(audio_bps).max(VIDEO_MIN_KBPS * 1000) / 1000;
+            let estimate_kbps = estimate
+                .saturating_sub(audio_bps)
+                .max(VIDEO_MIN_KBPS * 1000)
+                / 1000;
             let command = if vendored {
                 // The element holds its estimate through application-limited
                 // periods and re-measures on exit, so the estimate is current
@@ -3129,7 +3159,8 @@ mod tests {
 
     #[test]
     fn scales_common_sources_into_the_ceiling() {
-        let fit = |width, height| fit_within_capture_ceiling(width, height, DEFAULT_CAPTURE_CEILING);
+        let fit =
+            |width, height| fit_within_capture_ceiling(width, height, DEFAULT_CAPTURE_CEILING);
         // 4K scales to the ceiling.
         assert_eq!(fit(3840, 2160), (2560, 1440));
         // 16:10 is limited by height, preserving aspect.
@@ -3158,6 +3189,21 @@ mod tests {
             fit_within_capture_ceiling(1280, 720, (1920, 1080)),
             (1280, 720)
         );
+    }
+
+    #[test]
+    fn chat_send_budget_includes_the_pending_payload() {
+        let payload_bytes =
+            u64::try_from(CHAT_MAX_PAYLOAD_BYTES).expect("chat payload limit fits u64");
+        assert!(chat_send_fits_buffer(
+            CHAT_MAX_BUFFERED_BYTES - payload_bytes,
+            CHAT_MAX_PAYLOAD_BYTES,
+        ));
+        assert!(!chat_send_fits_buffer(
+            CHAT_MAX_BUFFERED_BYTES - payload_bytes + 1,
+            CHAT_MAX_PAYLOAD_BYTES,
+        ));
+        assert!(!chat_send_fits_buffer(CHAT_MAX_BUFFERED_BYTES + 1, 0));
     }
 
     #[test]

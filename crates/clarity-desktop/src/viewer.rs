@@ -21,7 +21,7 @@ use clarity_client::{ConnectionState, FrameSink, NativeHandle, NativeVideoSurfac
 use clarity_protocol::SharingState;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use crate::state::{ChatMessage, RoomCountdown, ViewerView};
+use crate::state::{ChatMessage, RoomCountdown, ViewerView, push_chat_message};
 
 enum Event {
     Status(String),
@@ -40,7 +40,10 @@ enum Event {
         width: Option<u32>,
         height: Option<u32>,
     },
-    Chat { sender: String, text: String },
+    Chat {
+        sender: String,
+        text: String,
+    },
     NativeSurface(Arc<NativeVideoSurface>),
     Ended(String),
 }
@@ -122,7 +125,9 @@ impl ViewerLink {
                 });
             }
             Err(error) => {
-                emit(Event::Ended(format!("That room link is not valid: {error}")));
+                emit(Event::Ended(format!(
+                    "That room link is not valid: {error}"
+                )));
             }
         }
 
@@ -193,11 +198,14 @@ impl ViewerLink {
                         view.frame_size = Some((w, h));
                     }
                 }
-                Event::Chat { sender, text } => view.messages.push(ChatMessage {
-                    from: sender,
-                    text,
-                    own: false,
-                }),
+                Event::Chat { sender, text } => push_chat_message(
+                    &mut view.messages,
+                    ChatMessage {
+                        from: sender,
+                        text,
+                        own: false,
+                    },
+                ),
                 Event::NativeSurface(surface) => {
                     self.surface = Some(surface);
                     view.native_video = true;
