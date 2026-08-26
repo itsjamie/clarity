@@ -2,8 +2,10 @@ import type { ChatMessage, ClientMessage, IceConfiguration } from '@/generated/p
 import { PROTOCOL_VERSION } from '@/config/environment';
 import {
   CHAT_CHANNEL_LABEL,
+  CHAT_MAX_QUEUED_MESSAGES,
   decodeChatMessage,
   encodeChatMessage,
+  trySendChatPayload,
 } from '@/lib/chat/chat-channel';
 import { forceRelayEnabled } from '@/lib/settings/app-settings';
 import {
@@ -66,8 +68,9 @@ export class ViewerPeerConnection {
   public sendChat(message: ChatMessage): void {
     const payload = encodeChatMessage(message);
     if (this.#chat?.readyState === 'open') {
-      this.#chat.send(payload);
+      trySendChatPayload(this.#chat, payload);
     } else {
+      if (this.#queuedChat.length >= CHAT_MAX_QUEUED_MESSAGES) this.#queuedChat.shift();
       this.#queuedChat.push(payload);
     }
   }
@@ -158,7 +161,7 @@ export class ViewerPeerConnection {
       if (message) this.#options.onChat(message);
     };
     const flush = () => {
-      for (const payload of this.#queuedChat.splice(0)) channel.send(payload);
+      for (const payload of this.#queuedChat.splice(0)) trySendChatPayload(channel, payload);
     };
     if (channel.readyState === 'open') {
       flush();

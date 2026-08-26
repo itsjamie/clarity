@@ -5,6 +5,7 @@ import {
   decodeChatMessage,
   encodeChatMessage,
   relayChatPayload,
+  trySendChatPayload,
 } from '@/lib/chat/chat-channel';
 import type { DiagnosticsCollector } from '@/lib/diagnostics/diagnostics-collector';
 import { forceRelayEnabled } from '@/lib/settings/app-settings';
@@ -146,7 +147,7 @@ export class PresenterConnectionManager {
   public sendChat(message: ChatMessage): void {
     const payload = encodeChatMessage(message);
     for (const entry of this.#entries.values()) {
-      if (entry.chat?.readyState === 'open') entry.chat.send(payload);
+      trySendChatPayload(entry.chat, payload);
     }
   }
 

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clarity_protocol::IceConfiguration;
+use clarity_protocol::{CHAT_MAX_QUEUED_MESSAGES, ChatMessage, IceConfiguration};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_sdp as gst_sdp;
@@ -326,19 +326,21 @@ impl Playback {
     /// channel is open are queued and flushed on open, so nothing typed
     /// during negotiation is lost.
     pub fn send_chat(&self, text: &str) {
+        if ChatMessage::from_json(text).is_none() {
+            tracing::warn!("dropping an invalid outbound chat payload");
+            return;
+        }
         let channel = self.shared.chat_channel.lock().expect("chat lock").clone();
         match channel {
-            Some(channel)
-                if channel.ready_state() == gst_webrtc::WebRTCDataChannelState::Open =>
-            {
-                channel.send_string(Some(text));
+            Some(channel) if channel.ready_state() == gst_webrtc::WebRTCDataChannelState::Open => {
+                crate::broadcast::send_chat_string(Some(&channel), text);
             }
             _ => {
-                self.shared
-                    .queued_chat
-                    .lock()
-                    .expect("chat lock")
-                    .push(text.to_owned());
+                let mut queued = self.shared.queued_chat.lock().expect("chat lock");
+                if queued.len() >= CHAT_MAX_QUEUED_MESSAGES {
+                    queued.remove(0);
+                }
+                queued.push(text.to_owned());
             }
         }
     }
@@ -357,7 +359,9 @@ impl Playback {
             }
             let events = shared.events.clone();
             channel.connect_on_message_string(move |_channel, message| {
-                if let Some(text) = message {
+                if let Some(text) = message
+                    && ChatMessage::from_json(text).is_some()
+                {
                     let _ = events.send(PlaybackEvent::Chat {
                         text: text.to_owned(),
                     });
@@ -372,7 +376,7 @@ impl Playback {
                     .drain(..)
                     .collect();
                 for text in queued {
-                    channel.send_string(Some(&text));
+                    crate::broadcast::send_chat_string(Some(channel), &text);
                 }
             });
             *shared.chat_channel.lock().expect("chat lock") = Some(channel.clone());
@@ -387,7 +391,7 @@ impl Playback {
                     .drain(..)
                     .collect();
                 for text in queued {
-                    channel.send_string(Some(&text));
+                    crate::broadcast::send_chat_string(Some(&channel), &text);
                 }
             }
             None
@@ -448,8 +452,7 @@ impl Playback {
         // caller (typically the GUI thread).
         crate::teardown::spawn_teardown("clarity-media-playback-teardown", move || {
             let deadline = Instant::now() + Duration::from_secs(5);
-            while webrtc
-                .property::<gst_webrtc::WebRTCICEGatheringState>("ice-gathering-state")
+            while webrtc.property::<gst_webrtc::WebRTCICEGatheringState>("ice-gathering-state")
                 == gst_webrtc::WebRTCICEGatheringState::Gathering
                 && Instant::now() < deadline
             {
@@ -777,7 +780,9 @@ pub(crate) fn frame_appsink(sink: FrameSink) -> Result<gst::Element, String> {
     let appsink = gst::ElementFactory::make("appsink")
         .build()
         .map_err(|_| "the media component `appsink` is unavailable".to_owned())?;
-    let caps = gst::Caps::builder("video/x-raw").field("format", "RGBA").build();
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "RGBA")
+        .build();
     appsink.set_property("caps", &caps);
     appsink.set_property("emit-signals", true);
     appsink.set_property("sync", false);
@@ -1067,8 +1072,7 @@ fn request_stats(webrtc: &gst::Element, shared: &Arc<Shared>) {
             let mut baseline = shared.fps_baseline.lock().expect("fps lock");
             let fps = baseline.as_ref().and_then(|previous| {
                 let elapsed = previous.at.elapsed().as_secs_f64();
-                (elapsed > 0.0)
-                    .then(|| frames.saturating_sub(previous.frames) as f64 / elapsed)
+                (elapsed > 0.0).then(|| frames.saturating_sub(previous.frames) as f64 / elapsed)
             });
             *baseline = Some(FpsBaseline {
                 at: Instant::now(),

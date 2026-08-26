@@ -1,5 +1,8 @@
 import {
   CHAT_CHANNEL_LABEL,
+  CHAT_MAX_BUFFERED_BYTES,
+  CHAT_MAX_PAYLOAD_BYTES,
+  CHAT_MAX_TEXT_CHARACTERS,
   decodeChatMessage,
   encodeChatMessage,
   relayChatPayload,
@@ -29,6 +32,13 @@ describe('chat envelope', () => {
   it('keeps unknown extra fields out of the decoded message', () => {
     const decoded = decodeChatMessage(JSON.stringify({ sender: 'a', text: 'b', extra: true }));
     expect(decoded).toEqual({ sender: 'a', text: 'b' });
+  });
+
+  it('rejects oversized decoded and encoded messages', () => {
+    const oversizedText = 'x'.repeat(CHAT_MAX_TEXT_CHARACTERS + 1);
+    expect(() => encodeChatMessage({ sender: 'June', text: oversizedText })).toThrow(RangeError);
+    expect(decodeChatMessage(JSON.stringify({ sender: 'June', text: oversizedText }))).toBeNull();
+    expect(decodeChatMessage('x'.repeat(CHAT_MAX_PAYLOAD_BYTES + 1))).toBeNull();
   });
 });
 
@@ -64,14 +74,39 @@ describe('presenter chat relay', () => {
     expect(open.sent).toEqual(['payload']);
     expect(connecting.sent).toEqual([]);
   });
+
+  it('drops delivery to backpressured or failed channels without aborting the fanout', () => {
+    const backpressured = new FakeChannel('open', CHAT_MAX_BUFFERED_BYTES + 1);
+    const failed = new FakeChannel('open', 0, true);
+    const healthy = new FakeChannel('open');
+
+    const delivered = relayChatPayload(
+      [
+        ['viewer-1', backpressured],
+        ['viewer-2', failed],
+        ['viewer-3', healthy],
+      ],
+      'presenter',
+      'payload',
+    );
+
+    expect(delivered).toEqual(['viewer-3']);
+    expect(backpressured.sent).toEqual([]);
+    expect(healthy.sent).toEqual(['payload']);
+  });
 });
 
 class FakeChannel implements ChatChannelLike {
   readonly sent: string[] = [];
 
-  public constructor(public readonly readyState: RTCDataChannelState) {}
+  public constructor(
+    public readonly readyState: RTCDataChannelState,
+    public readonly bufferedAmount = 0,
+    private readonly fail = false,
+  ) {}
 
   public send(payload: string): void {
+    if (this.fail) throw new Error('send failed');
     this.sent.push(payload);
   }
 }

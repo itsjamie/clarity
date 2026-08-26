@@ -4,7 +4,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use clarity_protocol::{FriendPresence, HostedRoom, SharingState};
+use clarity_protocol::{CHAT_MAX_TEXT_CHARACTERS, FriendPresence, HostedRoom, SharingState};
+
+const MAX_CHAT_ENTRIES: usize = 200;
 
 /// One room chat message. `own` is true for messages this user sent.
 #[derive(Clone)]
@@ -12,6 +14,13 @@ pub struct ChatMessage {
     pub from: String,
     pub text: String,
     pub own: bool,
+}
+
+pub(crate) fn push_chat_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
+    if messages.len() >= MAX_CHAT_ENTRIES {
+        messages.remove(0);
+    }
+    messages.push(message);
 }
 
 /// The latest friend presence, as fed from the background presence connection.
@@ -478,15 +487,18 @@ impl AppState {
         if text.is_empty() {
             return;
         }
+        if text.chars().count() > CHAT_MAX_TEXT_CHARACTERS {
+            return;
+        }
         let message = ChatMessage {
             from: self.own_display_name(),
             text: text.clone(),
             own: true,
         };
         if self.presenter_view.active {
-            self.presenter_view.messages.push(message);
+            push_chat_message(&mut self.presenter_view.messages, message);
         } else if self.viewer_view.active {
-            self.viewer_view.messages.push(message);
+            push_chat_message(&mut self.viewer_view.messages, message);
         } else {
             return;
         }

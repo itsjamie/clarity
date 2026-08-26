@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { useSessionState } from '@/hooks/use-session-state';
+import { CHAT_MAX_TEXT_CHARACTERS } from '@/lib/chat/chat-channel';
 import type { ChatEntry, ChatLog } from '@/lib/chat/chat-log';
 
 interface ChatPanelProps {
@@ -43,7 +44,7 @@ export function ChatPanel({ log, onSend, disabled = false, compact = false }: Ch
         <input
           type="text"
           value={draft}
-          maxLength={2_000}
+          maxLength={CHAT_MAX_TEXT_CHARACTERS}
           placeholder={disabled ? 'Chat connects with the room' : 'Message the room'}
           aria-label="Message the room"
           disabled={disabled}
