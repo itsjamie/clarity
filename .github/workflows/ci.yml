@@ -34,6 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            gstreamer1.0-nice \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
