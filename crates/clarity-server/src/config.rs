@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub bind_address: SocketAddr,
     pub public_base_url: Url,
     pub allowed_origins: HashSet<String>,
+    pub trusted_proxy_hops: usize,
     pub log_level: String,
     pub default_room_ttl: Duration,
     pub maximum_room_ttl: Duration,
@@ -45,6 +46,7 @@ impl std::fmt::Debug for AppConfig {
             .field("bind_address", &self.bind_address)
             .field("public_base_url", &self.public_base_url)
             .field("allowed_origins", &self.allowed_origins)
+            .field("trusted_proxy_hops", &self.trusted_proxy_hops)
             .field("log_level", &self.log_level)
             .field("default_room_ttl", &self.default_room_ttl)
             .field("maximum_room_ttl", &self.maximum_room_ttl)
@@ -129,6 +131,7 @@ impl AppConfig {
             bind_address,
             public_base_url,
             allowed_origins,
+            trusted_proxy_hops: env_parse("TRUSTED_PROXY_HOPS", 0_usize)?,
             log_level: env_string("LOG_LEVEL", "info,clarity_server=debug"),
             default_room_ttl: seconds(default_room_ttl_seconds, "DEFAULT_ROOM_TTL_SECONDS")?,
             maximum_room_ttl: seconds(maximum_room_ttl_seconds, "MAX_ROOM_TTL_SECONDS")?,
@@ -208,6 +211,9 @@ impl AppConfig {
     fn validate(&self) -> Result<()> {
         if self.allowed_origins.is_empty() {
             bail!("ALLOWED_ORIGINS must include at least one exact origin");
+        }
+        if self.trusted_proxy_hops > 16 {
+            bail!("TRUSTED_PROXY_HOPS must be no greater than 16");
         }
         for (name, secret) in [
             ("ROOM_TOKEN_HMAC_KEY", &self.room_token_hmac_key),

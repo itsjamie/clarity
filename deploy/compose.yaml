@@ -7,6 +7,9 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     env_file: ../.env
+    environment:
+      # `app` is private to this network and Caddy is its only ingress hop.
+      TRUSTED_PROXY_HOPS: "1"
     expose:
       - "8080"
     read_only: true
