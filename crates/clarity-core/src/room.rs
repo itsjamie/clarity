@@ -106,6 +106,7 @@ impl Default for RoomActorConfig {
 pub struct SessionHandle {
     pub outbound: mpsc::Sender<ServerMessage>,
     pub connection_id: String,
+    pub close: mpsc::UnboundedSender<()>,
 }
 
 /// One concrete transport connection for a peer. Peer ids survive reconnects;
@@ -269,6 +270,7 @@ struct PeerSession {
     joined_at: OffsetDateTime,
     connected: bool,
     outbound: Option<mpsc::Sender<ServerMessage>>,
+    close: mpsc::UnboundedSender<()>,
     resume_digest: SecretDigest,
     resume_expires_at: OffsetDateTime,
     disconnected_at: Option<OffsetDateTime>,
@@ -466,6 +468,7 @@ impl RoomState {
             joined_at: self.presenter.as_ref().map_or(now, |peer| peer.joined_at),
             connected: true,
             outbound: Some(session.outbound),
+            close: session.close,
             resume_digest: self.secrets.resume_digest(&resume_token),
             resume_expires_at,
             disconnected_at: None,
@@ -542,6 +545,7 @@ impl RoomState {
             joined_at: now,
             connected: true,
             outbound: Some(session.outbound),
+            close: session.close,
             resume_digest: self.secrets.resume_digest(&resume_token),
             resume_expires_at,
             disconnected_at: None,
@@ -589,6 +593,7 @@ impl RoomState {
             presenter.connected = true;
             presenter.outbound = Some(session.outbound.clone());
             presenter.connection_id.clone_from(&session.connection_id);
+            presenter.close = session.close.clone();
             presenter.disconnected_at = None;
             Some((presenter.peer_id.clone(), presenter.resume_expires_at))
         } else {
@@ -624,6 +629,7 @@ impl RoomState {
             viewer.connected = true;
             viewer.outbound = Some(session.outbound);
             viewer.connection_id.clone_from(&session.connection_id);
+            viewer.close = session.close;
             viewer.disconnected_at = None;
             if viewer.viewer_state == Some(ViewerState::Disconnected) {
                 viewer.viewer_state = Some(ViewerState::Approved);
@@ -1119,6 +1125,7 @@ fn try_send(peer: &mut PeerSession, message: ServerMessage) -> bool {
         Ok(()) => true,
         Err(error) => {
             warn!(peer_id = %peer.peer_id, error = %error, "peer outbound queue unavailable");
+            let _ = peer.close.send(());
             peer.connected = false;
             peer.outbound = None;
             false
@@ -1479,6 +1486,7 @@ mod tests {
     fn session() -> (SessionHandle, mpsc::Receiver<ServerMessage>) {
         static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
         let (outbound, receiver) = mpsc::channel(8);
+        let (close, _) = mpsc::unbounded_channel();
         (
             SessionHandle {
                 outbound,
@@ -1486,6 +1494,7 @@ mod tests {
                     "test-{}",
                     NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
                 ),
+                close,
             },
             receiver,
         )
@@ -1517,6 +1526,32 @@ mod tests {
             DomainError::AuthorizationDenied
         );
         room.ensure_connection(&second).expect("replacement connection");
+    }
+
+    #[test]
+    fn a_full_outbound_queue_requests_transport_shutdown() {
+        let (mut room, _, presenter_secret, viewer_secret, now) =
+            fixture_with_policy(RoomAccessPolicy::Public);
+        let (outbound, _receiver) = mpsc::channel(1);
+        let (close, mut close_requests) = mpsc::unbounded_channel();
+        room.authenticate_presenter(
+            &presenter_secret,
+            SessionHandle {
+                outbound,
+                connection_id: "full-queue-test".to_owned(),
+                close,
+            },
+            now,
+        )
+        .expect("presenter");
+
+        room.authenticate_viewer(&viewer_secret, None, None, session().0, now)
+            .expect("first viewer fills the presenter queue");
+        room.authenticate_viewer(&viewer_secret, None, None, session().0, now)
+            .expect("second viewer detects the full presenter queue");
+
+        assert_eq!(close_requests.try_recv(), Ok(()));
+        assert!(!room.snapshot(now).presenter_connected);
     }
 
     #[test]

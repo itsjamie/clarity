@@ -81,6 +81,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_ip: IpAddr) {
     let (mut socket_writer, mut socket_reader) = socket.split();
     let (outbound_tx, mut outbound_rx) =
         mpsc::channel::<ServerMessage>(state.config.room_actor.outbound_capacity);
+    let (close_tx, mut close_rx) = mpsc::unbounded_channel::<()>();
     let writer = tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
             let Ok(json) = serde_json::to_string(&message) else {
@@ -99,7 +100,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_ip: IpAddr) {
 
     let authentication = tokio::time::timeout(
         state.config.websocket_auth_timeout,
-        authenticate(&mut socket_reader, &outbound_tx, &state, client_ip),
+        authenticate(
+            &mut socket_reader,
+            &outbound_tx,
+            close_tx,
+            &state,
+            client_ip,
+        ),
     )
     .await;
 
@@ -129,9 +136,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_ip: IpAddr) {
     let mut heartbeat = tokio::time::interval(state.config.websocket_heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending_heartbeat: Option<(String, Instant)> = None;
+    let mut close_channel_open = true;
 
     loop {
         tokio::select! {
+            close = close_rx.recv(), if close_channel_open => {
+                if close.is_some() {
+                    break;
+                }
+                // Dropping a session record is not itself a transport failure.
+                // Only an explicit close message terminates the socket.
+                close_channel_open = false;
+            }
             _ = heartbeat.tick() => {
                 if pending_heartbeat.as_ref().is_some_and(|(_, deadline)| Instant::now() >= *deadline) {
                     warn!(room_id = %session.room_id, peer_id = %session.peer_id, "signaling heartbeat timed out");
@@ -228,6 +244,7 @@ fn authentication_failure(error: &DomainError) -> (ErrorCode, &'static str) {
 async fn authenticate(
     reader: &mut futures_util::stream::SplitStream<WebSocket>,
     outbound: &mpsc::Sender<ServerMessage>,
+    close: mpsc::UnboundedSender<()>,
     state: &AppState,
     client_ip: IpAddr,
 ) -> Result<AuthenticatedSession, DomainError> {
@@ -272,6 +289,7 @@ async fn authenticate(
     let session_handle = SessionHandle {
         outbound: outbound.clone(),
         connection_id: Uuid::new_v4().to_string(),
+        close,
     };
     let (room_id, request_id, outcome) = match message {
         ClientMessage::AuthPresenter {
