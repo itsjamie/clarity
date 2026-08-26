@@ -79,6 +79,7 @@ interface SourceReplacementSnapshot {
 export class PresenterConnectionManager {
   readonly #options: PresenterConnectionManagerOptions;
   readonly #entries = new Map<string, PeerEntry>();
+  readonly #creating = new Map<string, Promise<void>>();
   readonly #approvedViewerIds = new Set<string>();
   readonly #displayNames = new Map<string, string | null>();
   readonly #senderParameters = new SenderParameterController();
@@ -122,14 +123,14 @@ export class PresenterConnectionManager {
       this.#source = stream;
     }
     for (const peerId of this.#approvedViewerIds) {
-      if (!this.#entries.has(peerId)) await this.#createPeer(peerId);
+      await this.#ensurePeer(peerId);
     }
     return failures;
   }
 
   public async addApprovedViewer(peerId: string): Promise<void> {
     this.#approvedViewerIds.add(peerId);
-    if (!this.#entries.has(peerId)) await this.#createPeer(peerId);
+    await this.#ensurePeer(peerId);
   }
 
   /**
@@ -342,7 +343,7 @@ export class PresenterConnectionManager {
   }
 
   async #createPeer(peerId: string): Promise<void> {
-    if (!this.#iceConfiguration) return;
+    if (!this.#iceConfiguration || !this.#approvedViewerIds.has(peerId)) return;
     const connection = new RTCPeerConnection({
       iceServers: toRtcIceServers(this.#iceConfiguration),
       bundlePolicy: 'max-bundle',
@@ -351,19 +352,41 @@ export class PresenterConnectionManager {
     });
     // The chat channel is created before negotiation so it rides the first
     // offer; its label and JSON envelope match the native engine.
-    const chat = connection.createDataChannel(CHAT_CHANNEL_LABEL);
-    chat.onmessage = (event: MessageEvent<unknown>) => this.#onChatPayload(peerId, event.data);
     const videoTrack = this.#source?.getVideoTracks()[0] ?? null;
     // Without a source (idle room) a track-less sendonly transceiver keeps
     // the media section ready, so starting a share never renegotiates.
-    const transceiver = videoTrack && this.#source
-      ? connection.addTransceiver(videoTrack, { direction: 'sendonly', streams: [this.#source] })
-      : connection.addTransceiver('video', { direction: 'sendonly' });
-    await this.#codecs.applyPreference(transceiver, this.#codecMode);
+    let chat: RTCDataChannel;
+    let transceiver: RTCRtpTransceiver;
+    try {
+      chat = connection.createDataChannel(CHAT_CHANNEL_LABEL);
+      chat.onmessage = (event: MessageEvent<unknown>) => this.#onChatPayload(peerId, event.data);
+      transceiver = videoTrack && this.#source
+        ? connection.addTransceiver(videoTrack, { direction: 'sendonly', streams: [this.#source] })
+        : connection.addTransceiver('video', { direction: 'sendonly' });
+    } catch (error) {
+      connection.close();
+      throw error;
+    }
+    try {
+      await this.#codecs.applyPreference(transceiver, this.#codecMode);
+    } catch (error) {
+      connection.close();
+      throw error;
+    }
+    if (!this.#approvedViewerIds.has(peerId)) {
+      connection.close();
+      return;
+    }
     const audioTrack = this.#source?.getAudioTracks()[0];
-    const audioSender = audioTrack && this.#source
-      ? connection.addTrack(audioTrack, this.#source)
-      : null;
+    let audioSender: RTCRtpSender | null;
+    try {
+      audioSender = audioTrack && this.#source
+        ? connection.addTrack(audioTrack, this.#source)
+        : null;
+    } catch (error) {
+      connection.close();
+      throw error;
+    }
     const adaptation = new QualityAdaptationController(this.#mode, this.#qualityStrategy);
     const entry: PeerEntry = {
       peerId,
@@ -402,11 +425,49 @@ export class PresenterConnectionManager {
       if (connection.connectionState === 'failed') void this.#recover(entry);
     };
     connection.oniceconnectionstatechange = () => this.#emit(entry);
-    await this.#senderParameters.apply(entry.videoSender, entry.profile, entry.mode);
-    await this.#negotiate(entry, false);
+    try {
+      await this.#senderParameters.apply(entry.videoSender, entry.profile, entry.mode);
+      if (!this.#entryIsActive(entry)) return;
+      await this.#negotiate(entry, false);
+      if (!this.#entryIsActive(entry)) return;
+    } catch (error) {
+      if (this.#entries.get(peerId) === entry) {
+        entry.connection.close();
+        this.#entries.delete(peerId);
+        throw error;
+      }
+      // Removal while an awaited browser operation was in flight is an
+      // intentional cancellation, not a failed peer creation.
+      return;
+    }
     entry.stats.start();
     this.#options.diagnostics.record('peer.created', { peerId });
     this.#emit(entry);
+  }
+
+  async #ensurePeer(peerId: string): Promise<void> {
+    if (!this.#approvedViewerIds.has(peerId) || !this.#iceConfiguration) return;
+    const existing = this.#creating.get(peerId);
+    if (existing) {
+      await existing;
+      if (this.#approvedViewerIds.has(peerId) && !this.#entries.has(peerId)) {
+        await this.#ensurePeer(peerId);
+      }
+      return;
+    }
+    if (this.#entries.has(peerId)) return;
+    const creation = this.#createPeer(peerId).finally(() => {
+      if (this.#creating.get(peerId) === creation) this.#creating.delete(peerId);
+    });
+    this.#creating.set(peerId, creation);
+    await creation;
+    if (this.#approvedViewerIds.has(peerId) && !this.#entries.has(peerId)) {
+      await this.#ensurePeer(peerId);
+    }
+  }
+
+  #entryIsActive(entry: PeerEntry): boolean {
+    return this.#approvedViewerIds.has(entry.peerId) && this.#entries.get(entry.peerId) === entry;
   }
 
   async #negotiate(entry: PeerEntry, iceRestart: boolean): Promise<void> {
@@ -476,7 +537,7 @@ export class PresenterConnectionManager {
         const peerId = entry.peerId;
         this.removeViewer(peerId);
         this.#approvedViewerIds.add(peerId);
-        void this.#createPeer(peerId);
+        void this.#ensurePeer(peerId);
       }
     }, 8_000);
   }

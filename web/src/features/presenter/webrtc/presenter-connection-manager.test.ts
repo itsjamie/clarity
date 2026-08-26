@@ -11,6 +11,8 @@ const iceConfiguration: IceConfiguration = {
 describe('presenter connection manager reconfiguration', () => {
   beforeEach(() => {
     FakePeerConnection.instances.length = 0;
+    FakePeerConnection.failDataChannel = false;
+    FakeSender.setParametersGate = null;
     vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
   });
 
@@ -154,6 +156,85 @@ describe('presenter connection manager reconfiguration', () => {
     manager.stopAll();
   });
 
+  it('deduplicates concurrent creation requests for the same viewer', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    await Promise.all([
+      manager.addApprovedViewer('viewer-1'),
+      manager.addApprovedViewer('viewer-1'),
+    ]);
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(manager.statuses).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('makes duplicate callers wait for the shared negotiation', async () => {
+    const gate = deferred();
+    FakeSender.setParametersGate = gate.promise;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const first = manager.addApprovedViewer('viewer-1');
+    await vi.waitFor(() => expect(FakePeerConnection.instances).toHaveLength(1));
+    let duplicateFinished = false;
+    const duplicate = manager.addApprovedViewer('viewer-1').then(() => {
+      duplicateFinished = true;
+    });
+    await Promise.resolve();
+
+    expect(duplicateFinished).toBe(false);
+    gate.resolve();
+    await Promise.all([first, duplicate]);
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('recreates a viewer removed and re-added during in-flight creation', async () => {
+    const gate = deferred();
+    FakeSender.setParametersGate = gate.promise;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const first = manager.addApprovedViewer('viewer-1');
+    await vi.waitFor(() => expect(FakePeerConnection.instances).toHaveLength(1));
+    manager.removeViewer('viewer-1');
+    const readded = manager.addApprovedViewer('viewer-1');
+    gate.resolve();
+    await Promise.all([first, readded]);
+
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(FakePeerConnection.instances[0]?.connectionState).toBe('closed');
+    expect(manager.statuses).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('cancels an in-flight creation when the viewer is removed', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const creating = manager.addApprovedViewer('viewer-1');
+    manager.removeViewer('viewer-1');
+    await creating;
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances[0]!.connectionState).toBe('closed');
+    expect(manager.statuses).toEqual([]);
+    manager.stopAll();
+  });
+
+  it('closes a peer when synchronous channel setup fails', async () => {
+    FakePeerConnection.failDataChannel = true;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    await expect(manager.addApprovedViewer('viewer-1')).rejects.toThrow('channel setup failed');
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances[0]?.connectionState).toBe('closed');
+  });
+
   it('re-offers an idle-born peer when the first source arrives, then replaces silently', async () => {
     const sendSignal = vi.fn<(message: ClientMessage) => void>();
     const manager = new PresenterConnectionManager({
@@ -255,10 +336,12 @@ function activeConnection(): FakePeerConnection {
 }
 
 class FakeSender {
+  static setParametersGate: Promise<void> | null = null;
+
   readonly setParameters = vi.fn<(parameters: RTCRtpSendParameters) => Promise<void>>(
-    (parameters) => {
+    async (parameters) => {
       this.#parameters = copyParameters(parameters);
-      return Promise.resolve();
+      await FakeSender.setParametersGate;
     },
   );
   readonly replaceTrack = vi.fn<(track: MediaStreamTrack | null) => Promise<void>>(
@@ -277,6 +360,14 @@ class FakeSender {
   public parameters(): RTCRtpSendParameters {
     return copyParameters(this.#parameters);
   }
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
 }
 
 class FakeDataChannel {
@@ -298,6 +389,7 @@ class FakeDataChannel {
 
 class FakePeerConnection {
   static readonly instances: FakePeerConnection[] = [];
+  static failDataChannel = false;
 
   readonly videoSender = new FakeSender();
   readonly audioSenders: FakeSender[] = [];
@@ -315,6 +407,7 @@ class FakePeerConnection {
   }
 
   public createDataChannel(label: string): RTCDataChannel {
+    if (FakePeerConnection.failDataChannel) throw new Error('channel setup failed');
     this.chatChannel = new FakeDataChannel(label);
     return this.chatChannel as unknown as RTCDataChannel;
   }
