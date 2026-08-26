@@ -72,13 +72,18 @@ impl AppState {
         let presence_sink = presence.clone();
         tokio::spawn(async move {
             while let Some(event) = room_events_rx.recv().await {
-                match event {
+                let result = match event {
                     RoomEvent::Updated {
                         room_id,
                         approved_viewers,
                         sharing_state,
-                    } => presence_sink.room_updated(room_id, approved_viewers, sharing_state),
-                    RoomEvent::Closed { room_id } => presence_sink.room_closed(room_id),
+                    } => presence_sink
+                        .room_updated(room_id, approved_viewers, sharing_state)
+                        .await,
+                    RoomEvent::Closed { room_id } => presence_sink.room_closed(room_id).await,
+                };
+                if result.is_err() {
+                    break;
                 }
             }
         });

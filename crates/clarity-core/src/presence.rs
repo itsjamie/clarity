@@ -50,6 +50,11 @@ pub enum PresenceAuthError {
     BadSignature,
 }
 
+/// The presence actor has stopped and can no longer accept lifecycle changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("presence service unavailable")]
+pub struct PresenceUnavailable;
+
 impl PresenceAuthError {
     pub fn code(&self) -> ErrorCode {
         ErrorCode::AuthenticationFailed
@@ -569,44 +574,75 @@ impl PresenceRegistry {
 
     /// Registers a verified connection and returns its session id. The caller
     /// pairs this with [`disconnect`](Self::disconnect) on teardown.
-    pub fn connect(&self, code: String, outbound: PresenceHandle) -> SessionId {
+    pub async fn connect(
+        &self,
+        code: String,
+        outbound: PresenceHandle,
+    ) -> Result<SessionId, PresenceUnavailable> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.commands.try_send(PresenceCommand::Connect {
-            id,
-            code,
-            outbound,
-        });
-        id
+        self.commands
+            .send(PresenceCommand::Connect {
+                id,
+                code,
+                outbound,
+            })
+            .await
+            .map_err(|_| PresenceUnavailable)?;
+        Ok(id)
     }
 
-    pub fn subscribe(&self, id: SessionId, codes: Vec<String>) {
-        let _ = self.commands.try_send(PresenceCommand::Subscribe { id, codes });
+    pub async fn subscribe(
+        &self,
+        id: SessionId,
+        codes: Vec<String>,
+    ) -> Result<(), PresenceUnavailable> {
+        self.commands
+            .send(PresenceCommand::Subscribe { id, codes })
+            .await
+            .map_err(|_| PresenceUnavailable)
     }
 
-    pub fn announce(&self, id: SessionId, hosting: Option<HostedRoom>) {
-        let _ = self
-            .commands
-            .try_send(PresenceCommand::Announce { id, hosting });
+    pub async fn announce(
+        &self,
+        id: SessionId,
+        hosting: Option<HostedRoom>,
+    ) -> Result<(), PresenceUnavailable> {
+        self.commands
+            .send(PresenceCommand::Announce { id, hosting })
+            .await
+            .map_err(|_| PresenceUnavailable)
     }
 
     /// Pushes an authoritative room update to every host of `room_id`.
-    pub fn room_updated(&self, room_id: String, viewer_count: u32, sharing_state: SharingState) {
-        let _ = self.commands.try_send(PresenceCommand::RoomUpdated {
-            room_id,
-            viewer_count,
-            sharing_state,
-        });
+    pub async fn room_updated(
+        &self,
+        room_id: String,
+        viewer_count: u32,
+        sharing_state: SharingState,
+    ) -> Result<(), PresenceUnavailable> {
+        self.commands
+            .send(PresenceCommand::RoomUpdated {
+                room_id,
+                viewer_count,
+                sharing_state,
+            })
+            .await
+            .map_err(|_| PresenceUnavailable)
     }
 
     /// Clears the hosting state of every host of `room_id`.
-    pub fn room_closed(&self, room_id: String) {
-        let _ = self
-            .commands
-            .try_send(PresenceCommand::RoomClosed { room_id });
+    pub async fn room_closed(&self, room_id: String) -> Result<(), PresenceUnavailable> {
+        self.commands
+            .send(PresenceCommand::RoomClosed { room_id })
+            .await
+            .map_err(|_| PresenceUnavailable)
     }
 
-    pub fn disconnect(&self, id: SessionId) {
-        let _ = self.commands.try_send(PresenceCommand::Disconnect { id });
+    pub async fn disconnect(&self, id: SessionId) -> Result<(), PresenceUnavailable> {
+        self.commands
+            .send(PresenceCommand::Disconnect { id })
+            .await
+            .map_err(|_| PresenceUnavailable)
     }
 
     pub async fn shutdown(&self) {
@@ -642,6 +678,39 @@ async fn run_presence_actor(mut commands: mpsc::Receiver<PresenceCommand>, clock
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registry_waits_for_capacity_instead_of_dropping_lifecycle_commands() {
+        let (commands, mut receiver) = mpsc::channel(1);
+        let registry = PresenceRegistry {
+            commands: commands.clone(),
+            next_id: Arc::new(AtomicU64::new(1)),
+        };
+        commands
+            .send(PresenceCommand::Expire)
+            .await
+            .expect("fill actor queue");
+        let (outbound, _outbound_rx) = session();
+        let connecting = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.connect("clr-AAAA-AAAA".to_owned(), outbound).await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!connecting.is_finished(), "connect was dropped instead of waiting");
+        assert!(matches!(receiver.recv().await, Some(PresenceCommand::Expire)));
+        assert_eq!(connecting.await.expect("connect task"), Ok(1));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(PresenceCommand::Connect { id: 1, .. })
+        ));
+
+        drop(receiver);
+        assert_eq!(
+            registry.subscribe(1, Vec::new()).await,
+            Err(PresenceUnavailable)
+        );
+    }
 
     fn at() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("valid time")

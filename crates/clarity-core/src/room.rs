@@ -1218,8 +1218,9 @@ impl RoomRegistry {
         }
     }
 
-    /// Emits [`RoomEvent`]s from every room actor onto `events`. Events are
-    /// best-effort: a full or dropped receiver never blocks a room.
+    /// Emits [`RoomEvent`]s from every room actor onto `events`. A slow live
+    /// receiver applies backpressure so presence cannot silently diverge from
+    /// authoritative room state; a dropped receiver is skipped immediately.
     #[must_use]
     pub fn with_events(mut self, events: mpsc::Sender<RoomEvent>) -> Self {
         self.events = Some(events);
@@ -1330,7 +1331,7 @@ async fn run_room_actor(
             _ = interval.tick() => {
                 room.expire_stale(clock.now());
                 if room.lifecycle != RoomLifecycle::Open { break; }
-                emit_room_update(&room, &events, &mut announced);
+                emit_room_update(&room, &events, &mut announced).await;
             }
             command = commands.recv() => {
                 let Some(command) = command else { break; };
@@ -1389,20 +1390,20 @@ async fn run_room_actor(
                     RoomCommand::Shutdown => room.close(now, false),
                 }
                 if room.lifecycle != RoomLifecycle::Open { break; }
-                emit_room_update(&room, &events, &mut announced);
+                emit_room_update(&room, &events, &mut announced).await;
             }
         }
     }
     if let Some(events) = events {
-        let _ = events.try_send(RoomEvent::Closed {
+        let _ = events.send(RoomEvent::Closed {
             room_id: room.room_id.clone(),
-        });
+        }).await;
     }
 }
 
 /// Sends an [`RoomEvent::Updated`] when the observable room state moved past
 /// what was last announced.
-fn emit_room_update(
+async fn emit_room_update(
     room: &RoomState,
     events: &Option<mpsc::Sender<RoomEvent>>,
     announced: &mut (u32, SharingState),
@@ -1412,12 +1413,13 @@ fn emit_room_update(
     if current == *announced {
         return;
     }
-    *announced = current;
-    let _ = events.try_send(RoomEvent::Updated {
+    if events.send(RoomEvent::Updated {
         room_id: room.room_id.clone(),
         approved_viewers: current.0,
         sharing_state: current.1,
-    });
+    }).await.is_ok() {
+        *announced = current;
+    }
 }
 
 #[must_use]

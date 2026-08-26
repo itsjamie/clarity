@@ -11,7 +11,8 @@ pub use clock::ManualClock;
 pub use clock::{Clock, SystemClock, ago_compact};
 pub use crypto::{GeneratedRoomSecrets, SecretDigest, SecretDigestService, secret_as_str};
 pub use presence::{
-    PresenceAuthError, PresenceHandle, PresenceRegistry, SessionId, new_challenge, verify_identity,
+    PresenceAuthError, PresenceHandle, PresenceRegistry, PresenceUnavailable, SessionId,
+    new_challenge, verify_identity,
     verify_identity_for_hosts,
 };
 pub use room::{
