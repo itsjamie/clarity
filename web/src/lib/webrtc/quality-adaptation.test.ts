@@ -10,6 +10,18 @@ describe('quality adaptation', () => {
     expect(decision.profile.id).toBe('text-medium');
   });
 
+  it('clones the accumulated adaptation state independently', () => {
+    const controller = new QualityAdaptationController('text');
+    controller.evaluate({ packetLossRatio: 0.1 }, 0);
+    controller.evaluate({ packetLossRatio: 0.1 }, 2_000);
+    const snapshot = controller.clone();
+
+    controller.reset();
+
+    expect(snapshot.evaluate({ packetLossRatio: 0.1 }, 10_000).profile.id).toBe('text-medium');
+    expect(controller.evaluate({ packetLossRatio: 0.1 }, 10_000).profile.id).toBe('text-high');
+  });
+
   it('requires sustained health and an upgrade cooldown', () => {
     const controller = new QualityAdaptationController('motion', 'adaptive', 1);
     let changed = false;

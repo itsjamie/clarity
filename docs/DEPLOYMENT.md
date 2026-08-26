@@ -6,6 +6,12 @@ Use a public Linux VPS with Docker Engine, Compose v2, a stable public IPv4 addr
 
 The supplied Compose file uses host networking for coturn. This is deliberate: it avoids publishing a large relay-port range through Docker's userland/NAT layer and gives ICE candidates predictable addresses. It also removes container-network isolation for coturn, so run this stack only on a dedicated, hardened Linux host and bind no unrelated coturn services.
 
+The application container is exposed only on the private Compose network. The
+Compose file sets `TRUSTED_PROXY_HOPS=1`, allowing per-client rate limits to use
+Caddy's immediate client address. Direct deployments must leave this at `0`;
+only raise it when every hop between the public listener and the application is
+controlled and trusted.
+
 ## DNS
 
 Create these records before starting Caddy:

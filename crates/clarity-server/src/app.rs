@@ -34,7 +34,9 @@ use tower_http::{
 };
 use uuid::Uuid;
 
-use crate::{AppConfig, config::Environment, rate_limit::RateLimitService, ws};
+use crate::{
+    AppConfig, client_ip::client_ip, config::Environment, rate_limit::RateLimitService, ws,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -160,9 +162,10 @@ async fn create_room(
     request: Result<Json<CreateRoomRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     validate_origin(&state.config, &headers)?;
+    let client_ip = client_ip(remote, &headers, state.config.trusted_proxy_hops);
     if !state.rate_limits.check(
         "room-create",
-        &remote.ip().to_string(),
+        &client_ip.to_string(),
         state.config.room_creation_rate_limit,
     ) {
         return Err(AppError::new(

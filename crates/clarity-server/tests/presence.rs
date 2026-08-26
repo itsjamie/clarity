@@ -63,6 +63,7 @@ fn test_config(address: SocketAddr) -> AppConfig {
     let base_url = format!("http://{address}");
     AppConfig {
         environment: Environment::Development,
+        trusted_proxy_hops: 0,
         bind_address: address,
         public_base_url: Url::parse(&base_url).expect("url"),
         allowed_origins: HashSet::from([base_url]),
