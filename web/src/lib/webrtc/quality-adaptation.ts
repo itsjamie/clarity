@@ -64,6 +64,20 @@ export class QualityAdaptationController {
     return profile;
   }
 
+  public clone(): QualityAdaptationController {
+    const copy = new QualityAdaptationController(
+      this.#mode,
+      this.#strategy,
+      this.#profileIndex,
+    );
+    copy.#unhealthySamples = this.#unhealthySamples;
+    copy.#healthySamples = this.#healthySamples;
+    copy.#lastChangeAt = this.#lastChangeAt;
+    copy.#averageLoss = this.#averageLoss;
+    copy.#averageRtt = this.#averageRtt;
+    return copy;
+  }
+
   public setStrategy(strategy: QualityStrategy): void {
     this.#strategy = strategy;
     this.#unhealthySamples = 0;
