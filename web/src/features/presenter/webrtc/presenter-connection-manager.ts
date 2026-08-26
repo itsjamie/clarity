@@ -446,14 +446,24 @@ export class PresenterConnectionManager {
   }
 
   async #ensurePeer(peerId: string): Promise<void> {
-    if (this.#entries.has(peerId) || !this.#approvedViewerIds.has(peerId)) return;
+    if (!this.#approvedViewerIds.has(peerId) || !this.#iceConfiguration) return;
     const existing = this.#creating.get(peerId);
-    if (existing) return existing;
+    if (existing) {
+      await existing;
+      if (this.#approvedViewerIds.has(peerId) && !this.#entries.has(peerId)) {
+        await this.#ensurePeer(peerId);
+      }
+      return;
+    }
+    if (this.#entries.has(peerId)) return;
     const creation = this.#createPeer(peerId).finally(() => {
       if (this.#creating.get(peerId) === creation) this.#creating.delete(peerId);
     });
     this.#creating.set(peerId, creation);
-    return creation;
+    await creation;
+    if (this.#approvedViewerIds.has(peerId) && !this.#entries.has(peerId)) {
+      await this.#ensurePeer(peerId);
+    }
   }
 
   #entryIsActive(entry: PeerEntry): boolean {

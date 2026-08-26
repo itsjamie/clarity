@@ -12,6 +12,7 @@ describe('presenter connection manager reconfiguration', () => {
   beforeEach(() => {
     FakePeerConnection.instances.length = 0;
     FakePeerConnection.failDataChannel = false;
+    FakeSender.setParametersGate = null;
     vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
   });
 
@@ -169,6 +170,46 @@ describe('presenter connection manager reconfiguration', () => {
     manager.stopAll();
   });
 
+  it('makes duplicate callers wait for the shared negotiation', async () => {
+    const gate = deferred();
+    FakeSender.setParametersGate = gate.promise;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const first = manager.addApprovedViewer('viewer-1');
+    await vi.waitFor(() => expect(FakePeerConnection.instances).toHaveLength(1));
+    let duplicateFinished = false;
+    const duplicate = manager.addApprovedViewer('viewer-1').then(() => {
+      duplicateFinished = true;
+    });
+    await Promise.resolve();
+
+    expect(duplicateFinished).toBe(false);
+    gate.resolve();
+    await Promise.all([first, duplicate]);
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('recreates a viewer removed and re-added during in-flight creation', async () => {
+    const gate = deferred();
+    FakeSender.setParametersGate = gate.promise;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const first = manager.addApprovedViewer('viewer-1');
+    await vi.waitFor(() => expect(FakePeerConnection.instances).toHaveLength(1));
+    manager.removeViewer('viewer-1');
+    const readded = manager.addApprovedViewer('viewer-1');
+    gate.resolve();
+    await Promise.all([first, readded]);
+
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(FakePeerConnection.instances[0]?.connectionState).toBe('closed');
+    expect(manager.statuses).toHaveLength(1);
+    manager.stopAll();
+  });
+
   it('cancels an in-flight creation when the viewer is removed', async () => {
     const manager = createManager();
     await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
@@ -295,10 +336,12 @@ function activeConnection(): FakePeerConnection {
 }
 
 class FakeSender {
+  static setParametersGate: Promise<void> | null = null;
+
   readonly setParameters = vi.fn<(parameters: RTCRtpSendParameters) => Promise<void>>(
-    (parameters) => {
+    async (parameters) => {
       this.#parameters = copyParameters(parameters);
-      return Promise.resolve();
+      await FakeSender.setParametersGate;
     },
   );
   readonly replaceTrack = vi.fn<(track: MediaStreamTrack | null) => Promise<void>>(
@@ -317,6 +360,14 @@ class FakeSender {
   public parameters(): RTCRtpSendParameters {
     return copyParameters(this.#parameters);
   }
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
 }
 
 class FakeDataChannel {
