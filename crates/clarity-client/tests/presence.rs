@@ -44,6 +44,7 @@ fn test_config(address: SocketAddr) -> AppConfig {
     let base = format!("http://{address}");
     AppConfig {
         environment: Environment::Development,
+        trusted_proxy_hops: 0,
         bind_address: address,
         public_base_url: Url::parse(&base).expect("url"),
         allowed_origins: HashSet::from([base]),
