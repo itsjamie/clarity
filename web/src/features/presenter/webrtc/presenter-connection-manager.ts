@@ -291,7 +291,7 @@ export class PresenterConnectionManager {
       audioTrack: entry.audioSender?.track ?? null,
       negotiatedWithTrack: entry.negotiatedWithTrack,
       mode: entry.mode,
-      adaptation: entry.adaptation,
+      adaptation: entry.adaptation.clone(),
       profile: entry.profile,
       lastAdaptationReason: entry.lastAdaptationReason,
       videoParameters: entry.videoSender.getParameters(),
@@ -302,12 +302,14 @@ export class PresenterConnectionManager {
     const { entry } = snapshot;
     if (this.#entries.get(entry.peerId) !== entry) return;
     await entry.videoSender.replaceTrack(snapshot.videoTrack);
-    if (entry.audioSender !== snapshot.audioSender) {
+    const audioSenderChanged = entry.audioSender !== snapshot.audioSender;
+    if (audioSenderChanged) {
       if (entry.audioSender) entry.connection.removeTrack(entry.audioSender);
       entry.audioSender = snapshot.audioSender;
     }
     await snapshot.audioSender?.replaceTrack(snapshot.audioTrack);
-    const negotiationChanged = entry.negotiatedWithTrack !== snapshot.negotiatedWithTrack;
+    const negotiationChanged =
+      audioSenderChanged || entry.negotiatedWithTrack !== snapshot.negotiatedWithTrack;
     entry.negotiatedWithTrack = snapshot.negotiatedWithTrack;
     entry.mode = snapshot.mode;
     entry.adaptation = snapshot.adaptation;
