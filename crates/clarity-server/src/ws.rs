@@ -16,8 +16,7 @@ use clarity_core::{
     new_challenge, secret_as_str, verify_identity_for_hosts,
 };
 use clarity_protocol::{
-    ClientMessage, ErrorCode, IDENTITY_CONTEXT_ROOM_AUTH, PROTOCOL_VERSION, PeerRole,
-    ServerMessage,
+    ClientMessage, ErrorCode, IDENTITY_CONTEXT_ROOM_AUTH, PROTOCOL_VERSION, PeerRole, ServerMessage,
 };
 use futures_util::{SinkExt, StreamExt};
 use secrecy::SecretString;
@@ -273,11 +272,10 @@ async fn authenticate(
         );
         return Err(DomainError::AuthenticationFailed);
     }
-    if !state.rate_limits.check(
-        "auth",
-        &client_ip.to_string(),
-        state.config.auth_rate_limit,
-    ) {
+    if !state
+        .rate_limits
+        .check("auth", &client_ip.to_string(), state.config.auth_rate_limit)
+    {
         send_auth_failed(
             outbound,
             message.request_id().unwrap_or("rate-limited"),
@@ -437,7 +435,11 @@ async fn authenticate_viewer(
     .await
 }
 
-async fn auth_command<F>(state: &AppState, room_id: &str, command: F) -> Result<AuthOutcome, DomainError>
+async fn auth_command<F>(
+    state: &AppState,
+    room_id: &str,
+    command: F,
+) -> Result<AuthOutcome, DomainError>
 where
     F: FnOnce(oneshot::Sender<Result<AuthOutcome, DomainError>>) -> RoomCommand,
 {
@@ -669,9 +671,11 @@ async fn handle_authenticated_message(
             .await
         }
         ClientMessage::IceRefresh { request_id, .. } => {
-            action(state, &session.room_id, |reply| RoomCommand::ValidateConnection {
-                source: session.identity(),
-                reply,
+            action(state, &session.room_id, |reply| {
+                RoomCommand::ValidateConnection {
+                    source: session.identity(),
+                    reply,
+                }
             })
             .await
             .map_err(|error| (Some(request_id.clone()), error))?;

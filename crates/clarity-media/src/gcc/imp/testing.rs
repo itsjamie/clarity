@@ -262,7 +262,8 @@ impl TestRig {
             clock::advance_to(self.now);
             self.drain_pacer();
             self.deliver_feedback();
-            self.trajectory.push((self.now - self.epoch, self.estimate()));
+            self.trajectory
+                .push((self.now - self.epoch, self.estimate()));
         }
     }
 
@@ -343,7 +344,10 @@ impl TestRig {
         }
 
         let mut buffer = gst::Buffer::with_size(bytes).unwrap();
-        buffer.get_mut().unwrap().set_pts(dur2ts(self.now - self.epoch));
+        buffer
+            .get_mut()
+            .unwrap()
+            .set_pts(dur2ts(self.now - self.epoch));
         let _ = self.upstream.push(buffer);
     }
 
@@ -375,8 +379,11 @@ impl TestRig {
 
         // SAFETY: `ValueArray` is not `Send`, which the structure setters
         // require, but the event is built and consumed on this thread only.
-        let packets =
-            unsafe { glib::ValueArray::new(structures.iter()).to_value().into_send_value() };
+        let packets = unsafe {
+            glib::ValueArray::new(structures.iter())
+                .to_value()
+                .into_send_value()
+        };
         let s = gst::Structure::builder("RTPTWCCPackets")
             .field("packets", packets)
             .build();
@@ -1079,10 +1086,18 @@ mod scenarios {
         });
 
         rig.bwe.set_property("estimated-bitrate", 9_000_000u32);
-        assert_eq!(rig.estimate(), 4_000_000, "write above max-bitrate should clamp down to it");
+        assert_eq!(
+            rig.estimate(),
+            4_000_000,
+            "write above max-bitrate should clamp down to it"
+        );
 
         rig.bwe.set_property("estimated-bitrate", 50_000u32);
-        assert_eq!(rig.estimate(), 200_000, "write below min-bitrate should clamp up to it");
+        assert_eq!(
+            rig.estimate(),
+            200_000,
+            "write below min-bitrate should clamp up to it"
+        );
     }
 
     /// `notify::estimated-bitrate` fires exactly once for a live write, and
@@ -1106,9 +1121,13 @@ mod scenarios {
 
         let seen: std::sync::Arc<Mutex<Vec<u32>>> = Default::default();
         let seen_clone = seen.clone();
-        rig.bwe.connect_notify(Some("estimated-bitrate"), move |obj, _| {
-            seen_clone.lock().unwrap().push(obj.property::<u32>("estimated-bitrate"));
-        });
+        rig.bwe
+            .connect_notify(Some("estimated-bitrate"), move |obj, _| {
+                seen_clone
+                    .lock()
+                    .unwrap()
+                    .push(obj.property::<u32>("estimated-bitrate"));
+            });
 
         rig.bwe.set_property("estimated-bitrate", 9_000_000u32);
 
@@ -1183,12 +1202,13 @@ mod scenarios {
 
         // Resume traffic tracking the new estimate.
         let before_resume = rig.trajectory().len();
-        rig.run_for(Duration::milliseconds(200), |_, estimate| u64::from(estimate));
+        rig.run_for(Duration::milliseconds(200), |_, estimate| {
+            u64::from(estimate)
+        });
 
         for (elapsed, estimate) in &rig.trajectory()[before_resume..] {
             assert_eq!(
-                *estimate,
-                4_000_000,
+                *estimate, 4_000_000,
                 "estimate drifted from the live write at {elapsed}: stale \
                  controller bookkeeping re-applied a multiplicative increase \
                  on top of it"
@@ -1268,13 +1288,15 @@ mod scenarios {
         let mut offered_bits_total = 0u64;
         let mut drained_bits_total = 0u64;
         for _ in 0..TICKS {
-            owed_bits += offered_bps * super::super::BURST_TIME.whole_nanoseconds() as f64
-                / 1_000_000_000.0;
+            owed_bits +=
+                offered_bps * super::super::BURST_TIME.whole_nanoseconds() as f64 / 1_000_000_000.0;
             {
                 let imp = bwe.imp();
                 let mut state = imp.state.lock().unwrap();
                 while owed_bits >= (PACKET_SIZE * 8) as f64 {
-                    state.buffers.push_front(gst::Buffer::with_size(PACKET_SIZE).unwrap());
+                    state
+                        .buffers
+                        .push_front(gst::Buffer::with_size(PACKET_SIZE).unwrap());
                     owed_bits -= (PACKET_SIZE * 8) as f64;
                     offered_bits_total += (PACKET_SIZE * 8) as u64;
                 }
@@ -1392,5 +1414,4 @@ mod scenarios {
             "an absurd measurement over a near-empty window was adopted: {rate}"
         );
     }
-
 }

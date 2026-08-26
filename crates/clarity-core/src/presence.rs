@@ -581,11 +581,7 @@ impl PresenceRegistry {
     ) -> Result<SessionId, PresenceUnavailable> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.commands
-            .send(PresenceCommand::Connect {
-                id,
-                code,
-                outbound,
-            })
+            .send(PresenceCommand::Connect { id, code, outbound })
             .await
             .map_err(|_| PresenceUnavailable)?;
         Ok(id)
@@ -655,11 +651,7 @@ async fn run_presence_actor(mut commands: mpsc::Receiver<PresenceCommand>, clock
     while let Some(command) = commands.recv().await {
         let now = clock.now();
         match command {
-            PresenceCommand::Connect {
-                id,
-                code,
-                outbound,
-            } => state.connect(id, code, outbound),
+            PresenceCommand::Connect { id, code, outbound } => state.connect(id, code, outbound),
             PresenceCommand::Subscribe { id, codes } => state.subscribe(id, codes, now),
             PresenceCommand::Announce { id, hosting } => state.announce(id, hosting, now),
             PresenceCommand::RoomUpdated {
@@ -697,8 +689,14 @@ mod tests {
         });
 
         tokio::task::yield_now().await;
-        assert!(!connecting.is_finished(), "connect was dropped instead of waiting");
-        assert!(matches!(receiver.recv().await, Some(PresenceCommand::Expire)));
+        assert!(
+            !connecting.is_finished(),
+            "connect was dropped instead of waiting"
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(PresenceCommand::Expire)
+        ));
         assert_eq!(connecting.await.expect("connect task"), Ok(1));
         assert!(matches!(
             receiver.recv().await,
@@ -791,7 +789,10 @@ mod tests {
 
         // A watches B, but B never adds A.
         state.subscribe(1, vec![B.to_owned()], at());
-        assert!(view(&mut a_rx).is_empty(), "A must not see an unrequited add");
+        assert!(
+            view(&mut a_rx).is_empty(),
+            "A must not see an unrequited add"
+        );
         // B is told who is waiting — that is the friend request — but learns
         // nothing about A's presence until the pair is mutual.
         let mut b_presence = 0;
@@ -995,20 +996,30 @@ mod tests {
             sharing_state: SharingState::Live,
         };
         state.announce(1, Some(room.clone()), at());
-        assert_eq!(view(&mut b_rx).get(A).and_then(|p| p.hosting.clone()), Some(room));
+        assert_eq!(
+            view(&mut b_rx).get(A).and_then(|p| p.hosting.clone()),
+            Some(room)
+        );
 
         // The room actor reports a change: B sees the authoritative count and
         // sharing state without A re-announcing.
         state.room_updated("room1", 5, SharingState::Paused, at());
         let updated = view(&mut b_rx);
-        let hosting = updated.get(A).and_then(|p| p.hosting.clone()).expect("hosting");
+        let hosting = updated
+            .get(A)
+            .and_then(|p| p.hosting.clone())
+            .expect("hosting");
         assert_eq!(hosting.viewer_count, 5);
         assert_eq!(hosting.sharing_state, SharingState::Paused);
 
         // The room closes: B sees A stop hosting.
         state.room_closed("room1", at());
         let closed = view(&mut b_rx);
-        assert!(closed.get(A).is_some_and(|p| p.hosting.is_none() && p.online));
+        assert!(
+            closed
+                .get(A)
+                .is_some_and(|p| p.hosting.is_none() && p.online)
+        );
 
         // A disconnects: B sees it go offline with a last-seen time.
         state.disconnect(1, at() + time::Duration::seconds(30));

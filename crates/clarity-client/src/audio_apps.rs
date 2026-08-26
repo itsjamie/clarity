@@ -11,7 +11,10 @@ pub const DEFAULT_EXCLUDED: &[&str] = &["discord"];
 
 /// [`DEFAULT_EXCLUDED`] as the owned list the policy functions take.
 pub fn default_excluded() -> Vec<String> {
-    DEFAULT_EXCLUDED.iter().map(|name| (*name).to_owned()).collect()
+    DEFAULT_EXCLUDED
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
 }
 
 /// One application playback stream currently live on the audio graph.
@@ -199,9 +202,9 @@ pub enum NoAudioReason {
 pub fn default_audio_exclusion(excluded: &[String]) -> DefaultAudioDecision {
     match graph_snapshot() {
         Ok(dump) => decide_default_audio(&dump, excluded),
-        Err(error) => DefaultAudioDecision::NoAudio(NoAudioReason::GraphUnreadable(
-            error.to_string(),
-        )),
+        Err(error) => {
+            DefaultAudioDecision::NoAudio(NoAudioReason::GraphUnreadable(error.to_string()))
+        }
     }
 }
 

@@ -556,8 +556,14 @@ async fn decoded_frames_reach_the_frame_sink() {
     })
     .expect("playback starts");
 
-    pump_until_media(&broadcast, &mut broadcast_events, &playback, &mut playback_events, VIEWER)
-        .await;
+    pump_until_media(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+    )
+    .await;
 
     // A decoded frame should land in the sink shortly after media flows.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -617,8 +623,14 @@ async fn chat_flows_both_ways_over_the_data_channel() {
     })
     .expect("playback starts");
 
-    pump_until_media(&broadcast, &mut broadcast_events, &playback, &mut playback_events, VIEWER)
-        .await;
+    pump_until_media(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+    )
+    .await;
 
     // The data channel opens around the same time as media; resend until each
     // side observes the other's message.
@@ -673,7 +685,10 @@ async fn presenter_preview_frames_reach_the_sink() {
     }
 
     let frame = frame.expect("the presenter preview received a frame");
-    assert!(frame.width > 0 && frame.height > 0, "preview frame has real dimensions");
+    assert!(
+        frame.width > 0 && frame.height > 0,
+        "preview frame has real dimensions"
+    );
     assert_eq!(
         frame.data.len(),
         frame.width as usize * frame.height as usize * 4,
@@ -722,8 +737,14 @@ async fn ice_restart_keeps_media_flowing() {
     })
     .expect("playback starts");
 
-    pump_until_media(&broadcast, &mut broadcast_events, &playback, &mut playback_events, VIEWER)
-        .await;
+    pump_until_media(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+    )
+    .await;
 
     broadcast.restart_ice(VIEWER);
 
@@ -815,8 +836,14 @@ async fn replace_source_swaps_mid_stream() {
     })
     .expect("playback starts");
 
-    pump_until_media(&broadcast, &mut broadcast_events, &playback, &mut playback_events, VIEWER)
-        .await;
+    pump_until_media(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+    )
+    .await;
 
     broadcast
         .replace_source(SourceConfig::Synthetic(SyntheticSource {
@@ -891,8 +918,14 @@ async fn idle_then_replace_source_resumes_on_the_same_connection() {
     })
     .expect("playback starts");
 
-    pump_until_media(&broadcast, &mut broadcast_events, &playback, &mut playback_events, VIEWER)
-        .await;
+    pump_until_media(
+        &broadcast,
+        &mut broadcast_events,
+        &playback,
+        &mut playback_events,
+        VIEWER,
+    )
+    .await;
 
     broadcast.idle().expect("idle swaps in the placeholder");
     // The 640x360 idle placeholder reaches the viewer: the connection is

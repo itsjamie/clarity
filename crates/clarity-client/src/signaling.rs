@@ -124,10 +124,9 @@ const ICE_REFRESH_RETRY: std::time::Duration = std::time::Duration::from_secs(60
 /// (RFC 3339): [`ICE_REFRESH_LEAD`] before expiry, floored at a few seconds.
 pub(crate) fn ice_refresh_delay(expires_at: &str) -> std::time::Duration {
     const MINIMUM: std::time::Duration = std::time::Duration::from_secs(5);
-    let Ok(expiry) = time::OffsetDateTime::parse(
-        expires_at,
-        &time::format_description::well_known::Rfc3339,
-    ) else {
+    let Ok(expiry) =
+        time::OffsetDateTime::parse(expires_at, &time::format_description::well_known::Rfc3339)
+    else {
         return ICE_REFRESH_RETRY;
     };
     let until = expiry - ICE_REFRESH_LEAD - time::OffsetDateTime::now_utc();

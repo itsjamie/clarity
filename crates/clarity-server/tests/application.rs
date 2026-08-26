@@ -7,10 +7,10 @@ use clarity_protocol::{
     ClientMessage, CreateRoomRequest, CreateRoomResponse, ErrorCode, PROTOCOL_VERSION,
     RoomAccessPolicy, ServerMessage, SharingState,
 };
-use ring::signature::{Ed25519KeyPair, KeyPair};
 use clarity_server::{AppConfig, AppState, build_router, config::Environment};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, StatusCode};
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use secrecy::SecretString;
 use time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -879,7 +879,10 @@ async fn friends_only_rooms_admit_allowlisted_identities_and_reject_strangers() 
 
     // The allowlisted friend proves its key and joins approved immediately.
     let (_friend_socket, admitted) = join_friends_room(&server, &room, &friend, "Friend").await;
-    let ServerMessage::AuthSucceeded { snapshot, peer_id, .. } = admitted else {
+    let ServerMessage::AuthSucceeded {
+        snapshot, peer_id, ..
+    } = admitted
+    else {
         panic!("allowlisted friend should be admitted, got {admitted:?}");
     };
     assert!(snapshot.pending_viewers.is_empty());

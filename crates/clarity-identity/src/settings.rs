@@ -96,7 +96,10 @@ mod tests {
         // A file from an older build with only one known field still loads.
         let settings: Settings = serde_json::from_str(r#"{"always_relay":true}"#).expect("parse");
         assert!(settings.always_relay);
-        assert_eq!(settings.signaling_server, Settings::default().signaling_server);
+        assert_eq!(
+            settings.signaling_server,
+            Settings::default().signaling_server
+        );
         assert_eq!(settings.capture_profile, CaptureProfile::Text);
     }
 

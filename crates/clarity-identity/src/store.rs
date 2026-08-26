@@ -53,9 +53,13 @@ impl Store {
         })?;
 
         let identity = match read_json::<StoredIdentity>(&dir.join(IDENTITY_FILE))? {
-            Some(stored) => Some(Identity::from_stored(stored).map_err(|_| StoreError::Corrupt {
-                path: dir.join(IDENTITY_FILE),
-            })?),
+            Some(stored) => {
+                Some(
+                    Identity::from_stored(stored).map_err(|_| StoreError::Corrupt {
+                        path: dir.join(IDENTITY_FILE),
+                    })?,
+                )
+            }
             None => None,
         };
         let contacts = read_json(&dir.join(CONTACTS_FILE))?.unwrap_or_default();

@@ -19,9 +19,9 @@ mod viewer;
 
 use std::sync::Arc;
 
+use clarity_client::presenter::PresenterCommand as PresenterSessionCommand;
 use clarity_client::signaling::SessionIdentity;
 use clarity_client::viewer::ViewerCommand as ViewerSessionCommand;
-use clarity_client::presenter::PresenterCommand as PresenterSessionCommand;
 use clarity_protocol::RoomAccessPolicy;
 use eframe::egui;
 use state::{AppState, RoomAccess, Screen};
@@ -665,9 +665,7 @@ fn seed_demo_presence(state: &mut AppState) {
 /// `None` — the default, and any non-Wayland session — keeps the viewer on
 /// the frame-sink → egui-texture path.
 fn native_handle(frame: &eframe::Frame) -> Option<clarity_client::NativeHandle> {
-    use raw_window_handle::{
-        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-    };
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
     if std::env::var("CLARITY_NATIVE_VIDEO").as_deref() != Ok("1") {
         return None;
     }
@@ -728,34 +726,34 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
 fn configure_style(ctx: &egui::Context, pal: &Palette) {
     use egui::{FontFamily, FontId, TextStyle};
     ctx.all_styles_mut(|style| {
-    style.visuals.dark_mode = true;
-    style.visuals.override_text_color = Some(pal.text);
-    style.visuals.window_fill = pal.window;
-    style.visuals.panel_fill = pal.window;
-    style.visuals.extreme_bg_color = pal.input;
-    style.visuals.selection.bg_fill = pal.accent_dim;
-    style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, pal.accent);
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    style.text_styles = [
-        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
-        (
-            TextStyle::Button,
-            FontId::new(12.5, FontFamily::Proportional),
-        ),
-        (
-            TextStyle::Small,
-            FontId::new(11.0, FontFamily::Proportional),
-        ),
-        (
-            TextStyle::Monospace,
-            FontId::new(11.0, FontFamily::Monospace),
-        ),
-        (
-            TextStyle::Heading,
-            FontId::new(28.0, FontFamily::Proportional),
-        ),
-    ]
-    .into();
+        style.visuals.dark_mode = true;
+        style.visuals.override_text_color = Some(pal.text);
+        style.visuals.window_fill = pal.window;
+        style.visuals.panel_fill = pal.window;
+        style.visuals.extreme_bg_color = pal.input;
+        style.visuals.selection.bg_fill = pal.accent_dim;
+        style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, pal.accent);
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+        style.text_styles = [
+            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+            (
+                TextStyle::Button,
+                FontId::new(12.5, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Small,
+                FontId::new(11.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(11.0, FontFamily::Monospace),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(28.0, FontFamily::Proportional),
+            ),
+        ]
+        .into();
     });
 }

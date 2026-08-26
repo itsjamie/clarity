@@ -20,7 +20,10 @@ fn registry() -> &'static Mutex<Vec<JoinHandle<()>>> {
 /// Runs `work` on a detached background thread, registered so
 /// [`drain_teardowns`] can wait for it.
 pub(crate) fn spawn_teardown(name: &str, work: impl FnOnce() + Send + 'static) {
-    match std::thread::Builder::new().name(name.to_owned()).spawn(work) {
+    match std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(work)
+    {
         Ok(handle) => {
             let mut registry = registry().lock().expect("teardown lock");
             registry.retain(|entry| !entry.is_finished());
@@ -52,9 +55,6 @@ pub fn drain_teardowns(limit: Duration) -> bool {
     if pending.is_empty() {
         return true;
     }
-    registry()
-        .lock()
-        .expect("teardown lock")
-        .extend(pending);
+    registry().lock().expect("teardown lock").extend(pending);
     false
 }

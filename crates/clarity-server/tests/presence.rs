@@ -158,7 +158,11 @@ async fn send(socket: &mut ClientWebSocket, json: serde_json::Value) {
 /// server derived (which must equal the identity's own code). The signature
 /// is bound to the presence context and the server's host, exactly as the
 /// real clients sign.
-async fn handshake(socket: &mut ClientWebSocket, identity: &Identity, server: &TestServer) -> String {
+async fn handshake(
+    socket: &mut ClientWebSocket,
+    identity: &Identity,
+    server: &TestServer,
+) -> String {
     let PresenceServerMessage::Challenge { nonce, .. } = recv(socket).await else {
         panic!("expected challenge first");
     };
@@ -273,10 +277,7 @@ async fn recv_room(socket: &mut ClientWebSocket) -> ServerMessage {
     }
 }
 
-async fn authenticate_presenter(
-    server: &TestServer,
-    room: &CreateRoomResponse,
-) -> ClientWebSocket {
+async fn authenticate_presenter(server: &TestServer, room: &CreateRoomResponse) -> ClientWebSocket {
     let mut socket = connect_room(server).await;
     send_room(
         &mut socket,
@@ -509,8 +510,7 @@ async fn hosting_is_validated_and_pushed_live_from_the_room() {
     // A viewer joins: the room pushes the new count without a re-announce.
     let mut viewer = authenticate_viewer(&server, &room).await;
     wait_presence(&mut b, |f| {
-        f.code == id_a.code()
-            && f.hosting.as_ref().is_some_and(|h| h.viewer_count == 1)
+        f.code == id_a.code() && f.hosting.as_ref().is_some_and(|h| h.viewer_count == 1)
     })
     .await;
 
@@ -542,8 +542,7 @@ async fn hosting_is_validated_and_pushed_live_from_the_room() {
     )
     .await;
     wait_presence(&mut b, |f| {
-        f.code == id_a.code()
-            && f.hosting.as_ref().is_some_and(|h| h.viewer_count == 0)
+        f.code == id_a.code() && f.hosting.as_ref().is_some_and(|h| h.viewer_count == 0)
     })
     .await;
 

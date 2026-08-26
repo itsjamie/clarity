@@ -10,11 +10,7 @@ use axum::http::HeaderMap;
 /// closed to the transport peer, preventing an attacker from choosing a rate
 /// limit key with a forged header.
 #[must_use]
-pub fn client_ip(
-    remote: SocketAddr,
-    headers: &HeaderMap,
-    trusted_proxy_hops: usize,
-) -> IpAddr {
+pub fn client_ip(remote: SocketAddr, headers: &HeaderMap, trusted_proxy_hops: usize) -> IpAddr {
     if trusted_proxy_hops == 0 {
         return remote.ip();
     }

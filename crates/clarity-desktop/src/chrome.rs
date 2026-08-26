@@ -122,11 +122,9 @@ fn search_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
         Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
-    let galley = ui.painter().layout_no_wrap(
-        label,
-        egui::FontId::new(10.5, crate::theme::mono()),
-        fg,
-    );
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label, egui::FontId::new(10.5, crate::theme::mono()), fg);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, fg);
     resp
@@ -196,8 +194,11 @@ fn identity_footer(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
         ui.painter()
             .rect_filled(area, CornerRadius::ZERO, Color32::from_white_alpha(8));
     }
-    ui.painter()
-        .hline(area.x_range(), area.top(), Stroke::new(1.0_f32, pal.border_soft));
+    ui.painter().hline(
+        area.x_range(),
+        area.top(),
+        Stroke::new(1.0_f32, pal.border_soft),
+    );
 
     if let Some(identity) = &state.store.identity {
         let name = identity.display_name().to_owned();
@@ -256,14 +257,20 @@ fn live_now(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     let badge = (!live.is_empty()).then(|| live.len().to_string());
     Frame::NONE
         .inner_margin(Margin::symmetric(8, 2))
-        .show(ui, |ui| section_label(ui, pal, "Live now", badge.as_deref()));
+        .show(ui, |ui| {
+            section_label(ui, pal, "Live now", badge.as_deref())
+        });
     ui.add_space(4.0);
 
     if live.is_empty() {
         Frame::NONE
             .inner_margin(Margin::symmetric(9, 6))
             .show(ui, |ui| {
-                ui.label(text("No friends are sharing right now.", 11.0, pal.text_dim));
+                ui.label(text(
+                    "No friends are sharing right now.",
+                    11.0,
+                    pal.text_dim,
+                ));
             });
         return;
     }

@@ -28,9 +28,8 @@ use gstreamer::prelude::*;
 use wayland_client::backend::{Backend, ObjectId};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_registry, wl_shm,
-    wl_shm_pool::WlShmPool, wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface,
-    wl_surface::WlSurface,
+    wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_registry, wl_shm, wl_shm_pool::WlShmPool,
+    wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface, wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop};
 
@@ -319,7 +318,9 @@ fn anchor_buffer(shm: &wl_shm::WlShm, qh: &QueueHandle<State>) -> Option<WlBuffe
 fn display_context(context_type: &str, display: *mut c_void) -> gst::Context {
     let mut context = gst::Context::new(context_type, true);
     {
-        let context = context.get_mut().expect("newly created context is unshared");
+        let context = context
+            .get_mut()
+            .expect("newly created context is unshared");
         let mut value = glib::Value::from_type(glib::Type::POINTER);
         // SAFETY: the value was just initialized as G_TYPE_POINTER, and a raw
         // pointer used only within this process is safe to move across

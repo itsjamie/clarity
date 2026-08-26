@@ -67,7 +67,8 @@ impl AppState {
         // Room actors report viewer-count/sharing/close changes on this
         // channel; a forwarder task reflects them into friend presence.
         let (room_events, mut room_events_rx) = tokio::sync::mpsc::channel::<RoomEvent>(256);
-        let registry = RoomRegistry::new(secrets, config.room_actor.clone()).with_events(room_events);
+        let registry =
+            RoomRegistry::new(secrets, config.room_actor.clone()).with_events(room_events);
         let presence = PresenceRegistry::new(Arc::new(SystemClock));
         let presence_sink = presence.clone();
         tokio::spawn(async move {
@@ -77,9 +78,11 @@ impl AppState {
                         room_id,
                         approved_viewers,
                         sharing_state,
-                    } => presence_sink
-                        .room_updated(room_id, approved_viewers, sharing_state)
-                        .await,
+                    } => {
+                        presence_sink
+                            .room_updated(room_id, approved_viewers, sharing_state)
+                            .await
+                    }
                     RoomEvent::Closed { room_id } => presence_sink.room_closed(room_id).await,
                 };
                 if result.is_err() {
@@ -219,7 +222,9 @@ async fn create_room(
             viewer_url.query_pairs_mut().append_pair("access", "public");
         }
         RoomAccessPolicy::FriendsOnly => {
-            viewer_url.query_pairs_mut().append_pair("access", "friends");
+            viewer_url
+                .query_pairs_mut()
+                .append_pair("access", "friends");
         }
         RoomAccessPolicy::ApprovalRequired => {}
     }

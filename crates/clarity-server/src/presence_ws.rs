@@ -21,13 +21,13 @@ use clarity_protocol::{
     ErrorCode, HostedRoom, IDENTITY_CONTEXT_PRESENCE, PROTOCOL_VERSION, PresenceClientMessage,
     PresenceServerMessage, RoomLifecycle,
 };
-use secrecy::SecretString;
-use url::Url;
 use futures_util::{SinkExt, StreamExt};
+use secrecy::SecretString;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
+use url::Url;
 
 use crate::{
     AppState,
@@ -109,7 +109,8 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
         return;
     }
 
-    let read_deadline = state.config.websocket_heartbeat_interval + state.config.websocket_heartbeat_timeout;
+    let read_deadline =
+        state.config.websocket_heartbeat_interval + state.config.websocket_heartbeat_timeout;
     let identity_hosts = state.config.identity_hosts();
     let code = match authenticate(
         &mut stream,
@@ -138,11 +139,15 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
             return;
         }
     };
-    if outbound_tx.send(PresenceServerMessage::Ready {
-        protocol_version: PROTOCOL_VERSION,
-        server_timestamp: now_string(),
-        code: code.clone(),
-    }).await.is_err() {
+    if outbound_tx
+        .send(PresenceServerMessage::Ready {
+            protocol_version: PROTOCOL_VERSION,
+            server_timestamp: now_string(),
+            code: code.clone(),
+        })
+        .await
+        .is_err()
+    {
         let _ = state.presence.disconnect(session_id).await;
         finish(outbound_tx, writer).await;
         return;
@@ -356,7 +361,10 @@ fn presence_error(reason: Reject) -> PresenceServerMessage {
             ErrorCode::AuthenticationRequired,
             "The presence handshake was not completed in time.",
         ),
-        Reject::Malformed => (ErrorCode::InvalidMessage, "The presence message was not valid."),
+        Reject::Malformed => (
+            ErrorCode::InvalidMessage,
+            "The presence message was not valid.",
+        ),
         Reject::NotHello => (
             ErrorCode::AuthenticationRequired,
             "The first presence message must be a hello.",

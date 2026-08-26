@@ -25,7 +25,11 @@ pub fn bold() -> FontFamily {
 /// The platform's command-modifier label. Space Grotesk has no ⌘ glyph, and on
 /// Linux/Windows Ctrl is the honest key anyway.
 pub fn mod_key() -> &'static str {
-    if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" }
+    if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl"
+    }
 }
 
 /// Every color the design uses, resolved from oklch to sRGB.
@@ -110,9 +114,18 @@ pub fn install_fonts(ctx: &egui::Context) {
     // Three static Space Grotesk weights (ab_glyph renders a variable font's
     // base master only, so weight comes from separate files) plus Plex Mono.
     load("sg", include_bytes!("../assets/fonts/SpaceGrotesk-400.ttf"));
-    load("sg-medium", include_bytes!("../assets/fonts/SpaceGrotesk-500.ttf"));
-    load("sg-bold", include_bytes!("../assets/fonts/SpaceGrotesk-700.ttf"));
-    load("plex-mono", include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"));
+    load(
+        "sg-medium",
+        include_bytes!("../assets/fonts/SpaceGrotesk-500.ttf"),
+    );
+    load(
+        "sg-bold",
+        include_bytes!("../assets/fonts/SpaceGrotesk-700.ttf"),
+    );
+    load(
+        "plex-mono",
+        include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
+    );
 
     fonts
         .families
@@ -125,7 +138,11 @@ pub fn install_fonts(ctx: &egui::Context) {
         .or_default()
         .insert(0, "plex-mono".to_owned());
     // Heavier weights fall back to regular for any missing glyph.
-    for (family, primary) in [("mono", "plex-mono"), ("medium", "sg-medium"), ("bold", "sg-bold")] {
+    for (family, primary) in [
+        ("mono", "plex-mono"),
+        ("medium", "sg-medium"),
+        ("bold", "sg-bold"),
+    ] {
         fonts.families.insert(
             FontFamily::Name(family.into()),
             vec![primary.to_owned(), "sg".to_owned()],

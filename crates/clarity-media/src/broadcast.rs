@@ -959,7 +959,10 @@ impl Broadcast {
             let mut head = self.source_head.lock().expect("source lock");
             let old_head = std::mem::take(&mut *head);
             let mut parked_probe = None;
-            if let Some(head_src) = old_head.last().and_then(|element| element.static_pad("src")) {
+            if let Some(head_src) = old_head
+                .last()
+                .and_then(|element| element.static_pad("src"))
+            {
                 // Park the old head's streaming thread before unlinking so it
                 // can never push into a half-swapped tail. The probe fires
                 // once the thread reaches the pad; a stalled source has
@@ -987,12 +990,9 @@ impl Broadcast {
             if let Some((pad, probe)) = parked_probe {
                 pad.remove_probe(probe);
             }
-            if let Err(error) = activate_source_head(
-                &self.pipeline,
-                &self.tail,
-                &old_head,
-                &new_head,
-            ) {
+            if let Err(error) =
+                activate_source_head(&self.pipeline, &self.tail, &old_head, &new_head)
+            {
                 *head = old_head;
                 return Err(error);
             }
@@ -3222,11 +3222,20 @@ mod tests {
         let tail = make("audioconvert");
         let sink = make("fakesink");
         pipeline
-            .add_many([&old_head[0], &old_head[1], &new_head[0], &new_head[1], &tail, &sink])
+            .add_many([
+                &old_head[0],
+                &old_head[1],
+                &new_head[0],
+                &new_head[1],
+                &tail,
+                &sink,
+            ])
             .expect("add test elements");
         gst::Element::link_many(&old_head).expect("link old head");
         gst::Element::link_many(&new_head).expect("link new head");
-        old_head[1].link(&tail).expect("link old head to audio tail");
+        old_head[1]
+            .link(&tail)
+            .expect("link old head to audio tail");
         tail.link(&sink).expect("link audio tail");
 
         old_head[1].unlink(&tail);

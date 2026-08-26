@@ -72,8 +72,13 @@ fn home_body(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
 fn no_rooms_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     let connected = state.presence_view.connected;
     let mut create = false;
-    card(ui, pal.card_alt, pal.border, Margin::symmetric(20, 36), |ui| {
-        ui.vertical_centered(|ui| {
+    card(
+        ui,
+        pal.card_alt,
+        pal.border,
+        Margin::symmetric(20, 36),
+        |ui| {
+            ui.vertical_centered(|ui| {
             ui.label(strong("Nothing live yet", 16.0, pal.text));
             ui.add_space(8.0);
             let sub = if connected {
@@ -87,7 +92,8 @@ fn no_rooms_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked();
         });
-    });
+        },
+    );
     if create {
         state.open_create();
     }
@@ -182,30 +188,36 @@ fn idle_room_card(
     url: &str,
     here: u32,
 ) {
-    card(ui, pal.card_alt, pal.border, Margin::symmetric(18, 16), |ui| {
-        ui.horizontal(|ui| {
-            avatar(ui, 34.0, &crate::ui::initials(name), pal.raised, pal.text);
-            ui.add_space(14.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
-                ui.label(strong(format!("{name}'s room"), 14.0, pal.text));
-                let sub = match here {
-                    0 => "Open, nobody sharing yet".to_owned(),
-                    1 => "Open, nobody sharing yet · 1 here".to_owned(),
-                    n => format!("Open, nobody sharing yet · {n} here"),
-                };
-                ui.label(text(sub, 12.0, pal.text_dim));
+    card(
+        ui,
+        pal.card_alt,
+        pal.border,
+        Margin::symmetric(18, 16),
+        |ui| {
+            ui.horizontal(|ui| {
+                avatar(ui, 34.0, &crate::ui::initials(name), pal.raised, pal.text);
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
+                    ui.label(strong(format!("{name}'s room"), 14.0, pal.text));
+                    let sub = match here {
+                        0 => "Open, nobody sharing yet".to_owned(),
+                        1 => "Open, nobody sharing yet · 1 here".to_owned(),
+                        n => format!("Open, nobody sharing yet · {n} here"),
+                    };
+                    ui.label(text(sub, 12.0, pal.text_dim));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if crate::ui::neutral_button(ui, pal, "Join", 34.0)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        state.join_room(url.to_owned());
+                    }
+                });
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if crate::ui::neutral_button(ui, pal, "Join", 34.0)
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    state.join_room(url.to_owned());
-                }
-            });
-        });
-    });
+        },
+    );
 }
 
 /// The create-room modal — the design's create flow, floating over Home. Opened
@@ -255,8 +267,10 @@ pub fn create_room_modal(ctx: &egui::Context, pal: &Palette, state: &mut AppStat
             });
 
             field_label(ui, pal, "Who can join");
-            let access_labels: Vec<&str> =
-                crate::state::RoomAccess::ALL.iter().map(|a| a.label()).collect();
+            let access_labels: Vec<&str> = crate::state::RoomAccess::ALL
+                .iter()
+                .map(|a| a.label())
+                .collect();
             let access_idx = crate::state::RoomAccess::ALL
                 .iter()
                 .position(|a| *a == state.new_room_access)
@@ -268,18 +282,36 @@ pub fn create_room_modal(ctx: &egui::Context, pal: &Palette, state: &mut AppStat
             field_label(ui, pal, "Capture profile");
             ui.horizontal(|ui| {
                 let w = (ui.available_width() - 8.0) / 2.0;
-                profile_button(ui, pal, w, "Text", "Sharp at 30 fps", !state.new_room_motion, || {
-                    state.new_room_motion = false;
-                });
+                profile_button(
+                    ui,
+                    pal,
+                    w,
+                    "Text",
+                    "Sharp at 30 fps",
+                    !state.new_room_motion,
+                    || {
+                        state.new_room_motion = false;
+                    },
+                );
                 ui.add_space(8.0);
-                profile_button(ui, pal, w, "Motion", "Smooth at 60 fps", state.new_room_motion, || {
-                    state.new_room_motion = true;
-                });
+                profile_button(
+                    ui,
+                    pal,
+                    w,
+                    "Motion",
+                    "Smooth at 60 fps",
+                    state.new_room_motion,
+                    || {
+                        state.new_room_motion = true;
+                    },
+                );
             });
 
             field_label(ui, pal, "Room expires in");
-            let expiry_labels: Vec<&str> =
-                crate::state::RoomExpiry::ALL.iter().map(|e| e.label()).collect();
+            let expiry_labels: Vec<&str> = crate::state::RoomExpiry::ALL
+                .iter()
+                .map(|e| e.label())
+                .collect();
             let expiry_idx = crate::state::RoomExpiry::ALL
                 .iter()
                 .position(|e| *e == state.new_room_expiry)
@@ -419,8 +451,7 @@ fn try_join(state: &mut AppState) {
             state.join_room(link);
         }
         Err(_) => {
-            state.join_error =
-                Some("That doesn't look like a Clarity room link.".to_owned());
+            state.join_error = Some("That doesn't look like a Clarity room link.".to_owned());
         }
     }
 }
@@ -433,7 +464,11 @@ fn modal_close(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(14));
     }
     let c = rect.center();
-    let color = if resp.hovered() { pal.text_bright } else { pal.text_dim };
+    let color = if resp.hovered() {
+        pal.text_bright
+    } else {
+        pal.text_dim
+    };
     for d in [vec2(-4.0, -4.0), vec2(-4.0, 4.0)] {
         ui.painter()
             .line_segment([c + d, c - d], Stroke::new(1.4_f32, color));
@@ -462,7 +497,11 @@ fn faux_select(ui: &mut egui::Ui, pal: &Palette, value: &str) -> egui::Response 
         egui::FontId::new(13.0, egui::FontFamily::Proportional),
         pal.text_bright,
     );
-    chevron_down(ui.painter(), rect.right_center() - vec2(14.0, 0.0), pal.text_dim);
+    chevron_down(
+        ui.painter(),
+        rect.right_center() - vec2(14.0, 0.0),
+        pal.text_dim,
+    );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -724,7 +763,11 @@ fn palette_entries(state: &AppState) -> [(&'static str, Vec<PaletteEntry>); 3] {
             }
         })
         .collect();
-    [("Actions", actions), ("Live now", rooms), ("Friends", friends)]
+    [
+        ("Actions", actions),
+        ("Live now", rooms),
+        ("Friends", friends),
+    ]
 }
 
 pub fn command_palette(ctx: &egui::Context, pal: &Palette, state: &mut AppState) {
@@ -950,7 +993,15 @@ fn their_code_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
         ui.add_space(12.0);
         field_label(ui, pal, "Name them (only you see this)");
         ui.add_space(7.0);
-        crate::ui::text_field(ui, pal, &mut state.friend_name_draft, "e.g. Mara", 40.0, 13.0, false);
+        crate::ui::text_field(
+            ui,
+            pal,
+            &mut state.friend_name_draft,
+            "e.g. Mara",
+            40.0,
+            13.0,
+            false,
+        );
         if let Some(error) = &state.friend_error {
             ui.add_space(8.0);
             ui.label(text(error, 11.5, pal.red));
@@ -1025,7 +1076,12 @@ fn incoming_invites(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
         return;
     }
     constrained(ui, 900.0, |ui| {
-        section_label(ui, pal, "Invites for you", Some(&incoming.len().to_string()));
+        section_label(
+            ui,
+            pal,
+            "Invites for you",
+            Some(&incoming.len().to_string()),
+        );
         ui.add_space(10.0);
         ui.spacing_mut().item_spacing.y = 8.0;
         let mut accepted = None;
@@ -1051,31 +1107,37 @@ fn incoming_invites(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
 /// Renders one incoming request; `Some(true)` when Accept was clicked,
 /// `Some(false)` for Dismiss.
 fn incoming_invite(ui: &mut egui::Ui, pal: &Palette, code: &str) -> Option<bool> {
-    card(ui, pal.card_alt, pal.border, Margin::symmetric(16, 13), |ui| {
-        ui.horizontal(|ui| {
-            avatar(ui, 30.0, &crate::ui::initials(code), pal.raised, pal.text);
-            ui.add_space(14.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
-                ui.label(strong(code, 13.0, pal.text_bright));
-                ui.label(mono_text("added you and is waiting", 10.5, pal.text_dim));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let dismiss = crate::ui::outline_button(ui, pal, "Dismiss", 30.0).clicked();
-                ui.add_space(6.0);
-                let accept = accent_button(ui, pal, "Accept", 30.0).clicked();
-                if accept {
-                    Some(true)
-                } else if dismiss {
-                    Some(false)
-                } else {
-                    None
-                }
+    card(
+        ui,
+        pal.card_alt,
+        pal.border,
+        Margin::symmetric(16, 13),
+        |ui| {
+            ui.horizontal(|ui| {
+                avatar(ui, 30.0, &crate::ui::initials(code), pal.raised, pal.text);
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
+                    ui.label(strong(code, 13.0, pal.text_bright));
+                    ui.label(mono_text("added you and is waiting", 10.5, pal.text_dim));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let dismiss = crate::ui::outline_button(ui, pal, "Dismiss", 30.0).clicked();
+                    ui.add_space(6.0);
+                    let accept = accent_button(ui, pal, "Accept", 30.0).clicked();
+                    if accept {
+                        Some(true)
+                    } else if dismiss {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                })
+                .inner
             })
             .inner
-        })
-        .inner
-    })
+        },
+    )
 }
 
 /// Adds the requester back as a contact, which accepts the invite. The name
@@ -1098,24 +1160,29 @@ fn accept_request(state: &mut AppState, code: &str) {
 
 /// Renders one pending invite; returns true if its Cancel was clicked.
 fn pending_invite(ui: &mut egui::Ui, pal: &Palette, name: &str, meta: &str) -> bool {
-    card(ui, pal.card_alt, pal.border, Margin::symmetric(16, 13), |ui| {
-        ui.horizontal(|ui| {
-            avatar(ui, 30.0, &crate::ui::initials(name), pal.raised, pal.text);
-            ui.add_space(14.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
-                ui.label(strong(name, 13.0, pal.text_bright));
-                ui.label(mono_text(meta, 10.5, pal.text_dim));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                crate::ui::outline_button(ui, pal, "Cancel", 30.0).clicked()
+    card(
+        ui,
+        pal.card_alt,
+        pal.border,
+        Margin::symmetric(16, 13),
+        |ui| {
+            ui.horizontal(|ui| {
+                avatar(ui, 30.0, &crate::ui::initials(name), pal.raised, pal.text);
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
+                    ui.label(strong(name, 13.0, pal.text_bright));
+                    ui.label(mono_text(meta, 10.5, pal.text_dim));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    crate::ui::outline_button(ui, pal, "Cancel", 30.0).clicked()
+                })
+                .inner
             })
             .inner
-        })
-        .inner
-    })
+        },
+    )
 }
-
 
 // --- Settings ---
 
@@ -1165,16 +1232,26 @@ fn capture_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
             use clarity_identity::CaptureProfile::{Motion, Text};
             let profiles = [Text.label(), Motion.label()];
             let psel = usize::from(profile == Motion);
-            if let Some(i) =
-                labeled_dropdown(&mut cols[0], pal, "Profile", "settings-profile", &profiles, psel)
-            {
+            if let Some(i) = labeled_dropdown(
+                &mut cols[0],
+                pal,
+                "Profile",
+                "settings-profile",
+                &profiles,
+                psel,
+            ) {
                 next_profile = if i == 0 { Text } else { Motion };
             }
             let maxes = ["2560 × 1440", "1920 × 1080"];
             let msel = usize::from(!max.starts_with("2560"));
-            if let Some(i) =
-                labeled_dropdown(&mut cols[1], pal, "Max capture", "settings-max", &maxes, msel)
-            {
+            if let Some(i) = labeled_dropdown(
+                &mut cols[1],
+                pal,
+                "Max capture",
+                "settings-max",
+                &maxes,
+                msel,
+            ) {
                 next_max = maxes[i].to_owned();
             }
         });
@@ -1280,7 +1357,11 @@ fn codec_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                     vec2(14.0, 20.0),
                     egui::Label::new(mono_text(format!("{}", index + 1), 10.0, pal.text_faint)),
                 );
-                let name_color = if available { pal.text_bright } else { pal.text_dim };
+                let name_color = if available {
+                    pal.text_bright
+                } else {
+                    pal.text_dim
+                };
                 ui.add_sized(
                     vec2(44.0, 20.0),
                     egui::Label::new(strong(codec.label(), 12.5, name_color)),
@@ -1291,7 +1372,11 @@ fn codec_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                     ("software", pal.text_muted)
                 };
                 Frame::new()
-                    .fill(if hardware { pal.accent_wash } else { pal.raised })
+                    .fill(if hardware {
+                        pal.accent_wash
+                    } else {
+                        pal.raised
+                    })
                     .corner_radius(CornerRadius::same(99))
                     .inner_margin(Margin::symmetric(7, 2))
                     .show(ui, |ui| {
@@ -1339,7 +1424,11 @@ fn codec_card(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
 /// fonts carry no triangle glyphs), pointing up when `up`.
 fn rank_button(ui: &mut egui::Ui, pal: &Palette, up: bool) -> bool {
     let enabled = ui.is_enabled();
-    let color = if enabled { pal.text_muted } else { pal.text_faint };
+    let color = if enabled {
+        pal.text_muted
+    } else {
+        pal.text_faint
+    };
     let response = ui.add_sized(
         vec2(24.0, 22.0),
         egui::Button::new("")
@@ -1398,7 +1487,10 @@ fn connection_banner(ui: &mut egui::Ui, pal: &Palette, connected: bool) {
     let (dot, msg) = if connected {
         (pal.green, "Connected to your server.")
     } else {
-        (pal.amber, "Not connected yet. Clarity connects when you go online.")
+        (
+            pal.amber,
+            "Not connected yet. Clarity connects when you go online.",
+        )
     };
     Frame::NONE
         .fill(dot.gamma_multiply(0.14))
@@ -1420,13 +1512,20 @@ pub fn onboarding(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     let avail = ui.available_rect_before_wrap();
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(Rect::from_center_size(avail.center(), vec2(520.0, avail.height())))
+            .max_rect(Rect::from_center_size(
+                avail.center(),
+                vec2(520.0, avail.height()),
+            ))
             .layout(Layout::top_down(Align::Min)),
         |ui| {
             ui.add_space((avail.height() - 600.0).max(0.0) / 2.0);
             crate::chrome::logo_mark(ui, pal, 34.0);
             ui.add_space(24.0);
-            ui.label(mono_text("FIRST RUN", 10.0, pal.accent_text.gamma_multiply(0.85)));
+            ui.label(mono_text(
+                "FIRST RUN",
+                10.0,
+                pal.accent_text.gamma_multiply(0.85),
+            ));
             ui.add_space(14.0);
             ui.label(heading("Nothing to sign up for.", 40.0, pal.text_bright));
             ui.add_space(18.0);
@@ -1439,9 +1538,10 @@ pub fn onboarding(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
             ui.add_space(30.0);
             field_label(ui, pal, "Display name");
             ui.add_space(8.0);
-            let submit = crate::ui::text_field(ui, pal, &mut state.name_draft, "Jamie", 48.0, 15.0, false)
-                .lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let submit =
+                crate::ui::text_field(ui, pal, &mut state.name_draft, "Jamie", 48.0, 15.0, false)
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(16.0);
             field_label(ui, pal, "Clarity server");
             ui.add_space(8.0);
@@ -1469,14 +1569,16 @@ pub fn onboarding(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                 create_identity(state);
             }
             ui.add_space(28.0);
-            let (line, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+            let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
             ui.painter()
                 .rect_filled(line, CornerRadius::ZERO, pal.border_soft);
             ui.add_space(20.0);
             for (n, point) in [
                 ("01", "No account, no email, no password."),
-                ("02", "Screens and chat go peer to peer and are never stored."),
+                (
+                    "02",
+                    "Screens and chat go peer to peer and are never stored.",
+                ),
                 ("03", "You add friends by trading a short code."),
             ] {
                 ui.horizontal(|ui| {

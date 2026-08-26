@@ -144,8 +144,11 @@ fn viewer_room(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
 /// Shared by the presenter and viewer rooms.
 fn room_panel(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     let edge = ui.max_rect();
-    ui.painter()
-        .vline(edge.left(), edge.y_range(), Stroke::new(1.0_f32, pal.border_soft));
+    ui.painter().vline(
+        edge.left(),
+        edge.y_range(),
+        Stroke::new(1.0_f32, pal.border_soft),
+    );
     let peers = if state.presenter_view.active {
         state.presenter_view.viewers.len()
     } else {
@@ -155,18 +158,30 @@ fn room_panel(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     egui::Panel::top("room-tabs")
         .exact_size(42.0)
         .resizable(false)
-        .frame(Frame::NONE.fill(pal.panel).inner_margin(Margin::symmetric(10, 0)))
+        .frame(
+            Frame::NONE
+                .fill(pal.panel)
+                .inner_margin(Margin::symmetric(10, 0)),
+        )
         .show(ui, |ui| {
             let sep = ui.max_rect();
-            ui.painter()
-                .hline(sep.x_range(), sep.bottom(), Stroke::new(1.0_f32, pal.border_soft));
+            ui.painter().hline(
+                sep.x_range(),
+                sep.bottom(),
+                Stroke::new(1.0_f32, pal.border_soft),
+            );
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if tab_button(ui, pal, "Chat", state.room_tab == RoomTab::Chat).clicked() {
                     state.room_tab = RoomTab::Chat;
                 }
-                if tab_button(ui, pal, "Diagnostics", state.room_tab == RoomTab::Diagnostics)
-                    .clicked()
+                if tab_button(
+                    ui,
+                    pal,
+                    "Diagnostics",
+                    state.room_tab == RoomTab::Diagnostics,
+                )
+                .clicked()
                 {
                     state.room_tab = RoomTab::Diagnostics;
                 }
@@ -193,11 +208,18 @@ fn chat_body(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     egui::Panel::bottom("room-chat-input")
         .exact_size(64.0)
         .resizable(false)
-        .frame(Frame::NONE.fill(pal.panel).inner_margin(Margin::symmetric(14, 12)))
+        .frame(
+            Frame::NONE
+                .fill(pal.panel)
+                .inner_margin(Margin::symmetric(14, 12)),
+        )
         .show(ui, |ui| {
             let sep = ui.max_rect();
-            ui.painter()
-                .hline(sep.x_range(), sep.top(), Stroke::new(1.0_f32, pal.border_soft));
+            ui.painter().hline(
+                sep.x_range(),
+                sep.top(),
+                Stroke::new(1.0_f32, pal.border_soft),
+            );
             let edit = egui::TextEdit::singleline(&mut state.chat_draft)
                 .hint_text("Message the room")
                 .desired_width(f32::INFINITY)
@@ -224,15 +246,17 @@ fn chat_body(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    Frame::NONE.inner_margin(Margin::symmetric(14, 14)).show(ui, |ui| {
-                        if messages.is_empty() {
-                            ui.label(text("No messages yet. Say hello.", 12.0, pal.text_dim));
-                        }
-                        ui.spacing_mut().item_spacing.y = 12.0;
-                        for message in &messages {
-                            chat_row(ui, pal, message);
-                        }
-                    });
+                    Frame::NONE
+                        .inner_margin(Margin::symmetric(14, 14))
+                        .show(ui, |ui| {
+                            if messages.is_empty() {
+                                ui.label(text("No messages yet. Say hello.", 12.0, pal.text_dim));
+                            }
+                            ui.spacing_mut().item_spacing.y = 12.0;
+                            for message in &messages {
+                                chat_row(ui, pal, message);
+                            }
+                        });
                 });
         });
 }
@@ -266,7 +290,12 @@ fn presenter_diagnostics(ui: &mut egui::Ui, pal: &Palette, state: &AppState) {
     ui.spacing_mut().item_spacing.x = 10.0;
     ui.columns(2, |cols| {
         stat_tile(&mut cols[0], pal, "Watching", &watching.to_string());
-        stat_tile(&mut cols[1], pal, "Outgoing", &format!("{:.1} Mb/s", outgoing as f32 / 1000.0));
+        stat_tile(
+            &mut cols[1],
+            pal,
+            "Outgoing",
+            &format!("{:.1} Mb/s", outgoing as f32 / 1000.0),
+        );
     });
     ui.add_space(10.0);
     bitrate_sparkline(ui, pal, &state.presenter_view.bitrate_history);
@@ -359,7 +388,12 @@ fn bitrate_sparkline(ui: &mut egui::Ui, pal: &Palette, history: &crate::state::B
     if samples.len() >= 2 {
         let now = std::time::Instant::now();
         let window = crate::state::BitrateHistory::WINDOW.as_secs_f32();
-        let peak = samples.iter().map(|(_, kbps)| *kbps).max().unwrap_or(0).max(1) as f32;
+        let peak = samples
+            .iter()
+            .map(|(_, kbps)| *kbps)
+            .max()
+            .unwrap_or(0)
+            .max(1) as f32;
         let inner = rect.shrink(1.0);
         let points: Vec<egui::Pos2> = samples
             .iter()
@@ -439,7 +473,10 @@ fn export_section(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
         FontId::new(11.5, medium()),
         fg,
     );
-    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+    if resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
         state.report_note = Some(match write_report(state) {
             Ok(path) => format!("Saved to {}", path.display()),
             Err(error) => format!("Export failed: {error}"),
@@ -834,12 +871,7 @@ fn paint_video(
 
 /// Allocates the floating control bar pinned to the bottom of the stage and
 /// paints its chrome; `content` lays the controls inside it.
-fn control_bar(
-    ui: &mut egui::Ui,
-    pal: &Palette,
-    video: Rect,
-    content: impl FnOnce(&mut egui::Ui),
-) {
+fn control_bar(ui: &mut egui::Ui, pal: &Palette, video: Rect, content: impl FnOnce(&mut egui::Ui)) {
     let bar = Rect::from_min_max(
         pos2(video.left() + 20.0, video.bottom() - 70.0),
         pos2(video.right() - 20.0, video.bottom() - 16.0),
@@ -930,7 +962,13 @@ fn viewer_controls(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState, video
                     .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
             }
             v_rule(ui, pal);
-            if seg_button(ui, pal, "Diagnostics", state.room_tab == RoomTab::Diagnostics).clicked()
+            if seg_button(
+                ui,
+                pal,
+                "Diagnostics",
+                state.room_tab == RoomTab::Diagnostics,
+            )
+            .clicked()
             {
                 state.room_tab = RoomTab::Diagnostics;
             }
@@ -986,7 +1024,11 @@ fn volume_slider(ui: &mut egui::Ui, pal: &Palette, value: &mut f32) -> bool {
         }
     }
     let p = ui.painter();
-    p.rect_filled(track, CornerRadius::same(255), Color32::from_white_alpha(28));
+    p.rect_filled(
+        track,
+        CornerRadius::same(255),
+        Color32::from_white_alpha(28),
+    );
     let filled = Rect::from_min_max(
         track.left_top(),
         pos2(track.left() + track.width() * *value, track.bottom()),
@@ -1006,17 +1048,27 @@ fn fullscreen_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(12));
     }
-    let color = if resp.hovered() { pal.text_bright } else { pal.text_muted };
+    let color = if resp.hovered() {
+        pal.text_bright
+    } else {
+        pal.text_muted
+    };
     let c = rect.center();
     let r = 5.0;
     for (dx, dy) in [(-1.0_f32, -1.0_f32), (1.0, 1.0)] {
         let corner = c + vec2(dx * r, dy * r);
-        ui.painter()
-            .line_segment([c + vec2(dx * 1.5, dy * 1.5), corner], Stroke::new(1.4_f32, color));
-        ui.painter()
-            .line_segment([corner, corner - vec2(dx * 3.5, 0.0)], Stroke::new(1.4_f32, color));
-        ui.painter()
-            .line_segment([corner, corner - vec2(0.0, dy * 3.5)], Stroke::new(1.4_f32, color));
+        ui.painter().line_segment(
+            [c + vec2(dx * 1.5, dy * 1.5), corner],
+            Stroke::new(1.4_f32, color),
+        );
+        ui.painter().line_segment(
+            [corner, corner - vec2(dx * 3.5, 0.0)],
+            Stroke::new(1.4_f32, color),
+        );
+        ui.painter().line_segment(
+            [corner, corner - vec2(0.0, dy * 3.5)],
+            Stroke::new(1.4_f32, color),
+        );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1102,7 +1154,11 @@ fn presenter_topbar(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
             ui.label(mono_text(meta, 10.5, pal.text_dim));
             ui.add_space(12.0);
         }
-        ui.label(mono_text(&state.presenter_view.status, 10.5, pal.text_faint));
+        ui.label(mono_text(
+            &state.presenter_view.status,
+            10.5,
+            pal.text_faint,
+        ));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ghost_button(ui, pal, "Leave", false).clicked() {
                 state.leave_presenter();
@@ -1120,7 +1176,8 @@ fn presenter_topbar(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                 }
                 ui.add_space(8.0);
             }
-            if open && sharing == SharingState::Idle
+            if open
+                && sharing == SharingState::Idle
                 && bar_button(ui, pal, "Share my screen").clicked()
             {
                 state.start_share();
@@ -1144,7 +1201,10 @@ fn presenter_stage(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     // state is the design's hatched placeholder with a centered mono label.
     let previewing = !ended
         && sharing == SharingState::Live
-        && match (&state.presenter_view.texture, state.presenter_view.frame_size) {
+        && match (
+            &state.presenter_view.texture,
+            state.presenter_view.frame_size,
+        ) {
             (Some(texture), Some((w, h))) if w > 0 && h > 0 => {
                 painter.rect_filled(video, CornerRadius::same(10), pal.stage.gamma_multiply(0.6));
                 paint_video(&painter, video, texture, w, h, state.stage_fit);
@@ -1249,10 +1309,24 @@ fn presenter_stage(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
     let mut x = video.left() + 14.0;
     x += stage_pill(&painter, pal, pos2(x, y), label, Some(color), color);
     if previewing && let Some((w, h)) = state.presenter_view.frame_size {
-        x += stage_pill(&painter, pal, pos2(x + 7.0, y), &format!("{w}×{h}"), None, pal.text) + 7.0;
+        x += stage_pill(
+            &painter,
+            pal,
+            pos2(x + 7.0, y),
+            &format!("{w}×{h}"),
+            None,
+            pal.text,
+        ) + 7.0;
     }
     if reconnecting {
-        stage_pill(&painter, pal, pos2(x + 7.0, y), "RECONNECTING", Some(pal.amber), pal.amber);
+        stage_pill(
+            &painter,
+            pal,
+            pos2(x + 7.0, y),
+            "RECONNECTING",
+            Some(pal.amber),
+            pal.amber,
+        );
     }
 
     presenter_controls(ui, pal, state, video);
@@ -1290,7 +1364,10 @@ fn share_affordance(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState, vide
         FontId::new(10.0, mono()),
         pal.text_faint,
     );
-    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+    if resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
         state.start_share();
     }
 }
@@ -1338,7 +1415,13 @@ fn presenter_controls(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState, vi
                 state.close_room();
             }
             v_rule(ui, pal);
-            if seg_button(ui, pal, "Diagnostics", state.room_tab == RoomTab::Diagnostics).clicked()
+            if seg_button(
+                ui,
+                pal,
+                "Diagnostics",
+                state.room_tab == RoomTab::Diagnostics,
+            )
+            .clicked()
             {
                 state.room_tab = RoomTab::Diagnostics;
             }
@@ -1535,13 +1618,21 @@ fn stage_pill(
     let dot_w = if dot.is_some() { 11.0 } else { 0.0 };
     let w = galley.size().x + 20.0 + dot_w;
     let rect = Rect::from_min_size(top_left, vec2(w, 20.0));
-    painter.rect_filled(rect, CornerRadius::same(255), Color32::from_black_alpha(210));
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(255),
+        Color32::from_black_alpha(210),
+    );
     let mut tx = rect.left() + 10.0;
     if let Some(c) = dot {
         painter.circle_filled(pos2(tx + 2.5, rect.center().y), 2.5, c);
         tx += dot_w;
     }
-    painter.galley(pos2(tx, rect.center().y - galley.size().y / 2.0), galley, fg);
+    painter.galley(
+        pos2(tx, rect.center().y - galley.size().y / 2.0),
+        galley,
+        fg,
+    );
     w
 }
 
@@ -1571,7 +1662,11 @@ fn theatre_button(ui: &mut egui::Ui, pal: &Palette, active: bool) -> egui::Respo
         0.0,
         egui::TextFormat::simple(FontId::new(11.5, medium()), fg),
     );
-    job.append("T", 0.0, egui::TextFormat::simple(FontId::new(10.0, mono()), hint));
+    job.append(
+        "T",
+        0.0,
+        egui::TextFormat::simple(FontId::new(10.0, mono()), hint),
+    );
     let galley = ui.painter().layout_job(job);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 22.0, 28.0), Sense::click());
     let bg = if resp.hovered() && !active {
@@ -1601,12 +1696,14 @@ fn theatre_chat(ctx: &egui::Context, pal: &Palette, state: &mut AppState) {
     let default_pos = pos2(content.right() - W - 24.0, content.top() + 96.0);
     let mut pos = state.theatre_chat_pos.unwrap_or(default_pos);
     // Keep the header reachable so the window can always be dragged back.
-    pos.x = pos
-        .x
-        .clamp(content.left() + 8.0, (content.right() - W - 8.0).max(content.left() + 8.0));
-    pos.y = pos
-        .y
-        .clamp(content.top() + 46.0, (content.bottom() - 160.0).max(content.top() + 46.0));
+    pos.x = pos.x.clamp(
+        content.left() + 8.0,
+        (content.right() - W - 8.0).max(content.left() + 8.0),
+    );
+    pos.y = pos.y.clamp(
+        content.top() + 46.0,
+        (content.bottom() - 160.0).max(content.top() + 46.0),
+    );
     let messages: Vec<crate::state::ChatMessage> = if state.presenter_view.active {
         state.presenter_view.messages.clone()
     } else {
@@ -1647,7 +1744,10 @@ fn theatre_chat(ctx: &egui::Context, pal: &Palette, state: &mut AppState) {
                         p.layout_no_wrap("Chat".to_owned(), FontId::new(12.0, medium()), pal.text);
                     let title_w = title.size().x;
                     p.galley(
-                        pos2(header.left() + 12.0, header.center().y - title.size().y / 2.0),
+                        pos2(
+                            header.left() + 12.0,
+                            header.center().y - title.size().y / 2.0,
+                        ),
                         title,
                         pal.text,
                     );
@@ -1694,7 +1794,11 @@ fn theatre_chat(ctx: &egui::Context, pal: &Palette, state: &mut AppState) {
                         .show(ui, |ui| {
                             Frame::NONE.inner_margin(Margin::same(12)).show(ui, |ui| {
                                 if messages.is_empty() {
-                                    ui.label(text("No messages yet. Say hello.", 12.0, pal.text_dim));
+                                    ui.label(text(
+                                        "No messages yet. Say hello.",
+                                        12.0,
+                                        pal.text_dim,
+                                    ));
                                 }
                                 ui.spacing_mut().item_spacing.y = 12.0;
                                 for message in &messages {
@@ -1740,7 +1844,15 @@ fn theatre_chat(ctx: &egui::Context, pal: &Palette, state: &mut AppState) {
 
 /// A raised bar button, e.g. the room's "Copy link".
 fn bar_button(ui: &mut egui::Ui, pal: &Palette, label: &str) -> egui::Response {
-    small_button(ui, pal, label, pal.text, pal.raised, pal.border_strong, false)
+    small_button(
+        ui,
+        pal,
+        label,
+        pal.text,
+        pal.raised,
+        pal.border_strong,
+        false,
+    )
 }
 
 fn ghost_button(ui: &mut egui::Ui, pal: &Palette, label: &str, danger: bool) -> egui::Response {
@@ -1801,8 +1913,14 @@ mod tests {
     fn loss_percent_formats_and_flags_high_loss() {
         assert_eq!(loss_percent(None, None).0, "—");
         assert_eq!(loss_percent(Some(5), Some(0)).0, "—");
-        assert_eq!(loss_percent(Some(0), Some(1000)), ("0.0%".to_owned(), false));
-        assert_eq!(loss_percent(Some(14), Some(1000)), ("1.4%".to_owned(), true));
+        assert_eq!(
+            loss_percent(Some(0), Some(1000)),
+            ("0.0%".to_owned(), false)
+        );
+        assert_eq!(
+            loss_percent(Some(14), Some(1000)),
+            ("1.4%".to_owned(), true)
+        );
         // A negative cumulative counter (RTCP quirk) clamps to zero.
         assert_eq!(loss_percent(Some(-5), Some(1000)).0, "0.0%");
     }

@@ -18,17 +18,23 @@ pub fn text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
 
 /// Medium-weight text — names, labels, emphasis (Space Grotesk 500).
 pub fn strong(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).font(FontId::new(size, medium())).color(color)
+    RichText::new(s)
+        .font(FontId::new(size, medium()))
+        .color(color)
 }
 
 /// Bold text — headings (Space Grotesk 700).
 pub fn heading(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).font(FontId::new(size, bold())).color(color)
+    RichText::new(s)
+        .font(FontId::new(size, bold()))
+        .color(color)
 }
 
 /// Monospace text — the design's IBM Plex Mono for codes, metrics, labels.
 pub fn mono_text(s: impl Into<String>, size: f32, color: Color32) -> RichText {
-    RichText::new(s).font(FontId::new(size, mono())).color(color)
+    RichText::new(s)
+        .font(FontId::new(size, mono()))
+        .color(color)
 }
 
 /// An uppercase, letter-spaced mono section label like "LIVE NOW".
@@ -240,13 +246,7 @@ pub fn text_field(
 
 /// A checkbox with a title and a muted one-line explanation beside it. Returns
 /// true on the frame it is toggled so callers can persist the change.
-pub fn checkbox_row(
-    ui: &mut Ui,
-    pal: &Palette,
-    checked: bool,
-    title: &str,
-    sub: &str,
-) -> bool {
+pub fn checkbox_row(ui: &mut Ui, pal: &Palette, checked: bool, title: &str, sub: &str) -> bool {
     ui.horizontal_top(|ui| {
         let (box_rect, resp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
         let box_rect = box_rect.translate(vec2(0.0, 2.0));
@@ -278,7 +278,8 @@ pub fn checkbox_row(
             ui.label(text(title, 12.5, pal.text));
             ui.label(text(sub, 11.5, pal.text_dim));
         });
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
     })
     .inner
 }
@@ -316,8 +317,14 @@ pub fn fill_around(painter: &egui::Painter, outer: Rect, hole: Rect, color: Colo
     };
     band(outer.left_top(), pos2(outer.right(), hole.top()));
     band(pos2(outer.left(), hole.bottom()), outer.right_bottom());
-    band(pos2(outer.left(), hole.top()), pos2(hole.left(), hole.bottom()));
-    band(pos2(hole.right(), hole.top()), pos2(outer.right(), hole.bottom()));
+    band(
+        pos2(outer.left(), hole.top()),
+        pos2(hole.left(), hole.bottom()),
+    );
+    band(
+        pos2(hole.right(), hole.top()),
+        pos2(outer.right(), hole.bottom()),
+    );
 }
 
 /// Fills `rect` with the design's diagonal two-tone hatch, approximating its

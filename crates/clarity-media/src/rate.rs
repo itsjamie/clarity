@@ -67,7 +67,11 @@ pub(crate) struct RateCommand {
 /// estimate is current by construction, so it is applied directly, with the
 /// same VBR peak headroom the controller keeps so that real content can
 /// burst above the target and re-measure the link.
-pub(crate) fn trust_estimate(estimate_kbps: u32, floor_kbps: u32, ceiling_kbps: u32) -> RateCommand {
+pub(crate) fn trust_estimate(
+    estimate_kbps: u32,
+    floor_kbps: u32,
+    ceiling_kbps: u32,
+) -> RateCommand {
     let ceiling_kbps = floor_kbps.max(ceiling_kbps);
     let target_kbps = estimate_kbps.clamp(floor_kbps, ceiling_kbps);
     RateCommand {
@@ -154,9 +158,7 @@ impl AdaptiveController {
                         // send rate instead — the same response, re-anchored.
                         // The 0.92 trigger needs two consecutive decreases, so
                         // a single spurious detection cannot fire it.
-                        self.capacity_kbps = self
-                            .capacity_kbps
-                            .min(frac(actual_send_kbps, 17, 20));
+                        self.capacity_kbps = self.capacity_kbps.min(frac(actual_send_kbps, 17, 20));
                         self.belief = Belief::Validating {
                             peak_kbps: estimate_kbps,
                         };
@@ -220,7 +222,9 @@ impl SendRateSampler {
         if elapsed >= SAMPLE_WINDOW {
             let bits = bytes_sent.saturating_sub(window_bytes).saturating_mul(8);
             // Bits per millisecond is kbit per second.
-            let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX).max(1);
+            let millis = u64::try_from(elapsed.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1);
             self.kbps = u32::try_from(bits / millis).unwrap_or(u32::MAX);
             self.window_start = Some((bytes_sent, now));
         }
@@ -241,7 +245,11 @@ mod tests {
         for _ in 0..10 {
             ctl.on_estimate(800, 300);
         }
-        assert_eq!(ctl.capacity_kbps(), 4_500, "idle estimate must not lower capacity");
+        assert_eq!(
+            ctl.capacity_kbps(),
+            4_500,
+            "idle estimate must not lower capacity"
+        );
     }
 
     // With real content saturating the encoder and a live estimate, a genuine
@@ -252,7 +260,10 @@ mod tests {
         // Sending near capacity (not application-limited); estimate drops.
         let cmd = ctl.on_estimate(2_000, 4_400);
         assert_eq!(cmd.target_kbps, 2_000);
-        assert_eq!(cmd.max_kbps, 3_000, "the VBR peak keeps burst headroom above the target");
+        assert_eq!(
+            cmd.max_kbps, 3_000,
+            "the VBR peak keeps burst headroom above the target"
+        );
     }
 
     // A busy screen re-measures the link: capacity climbs to the estimate.
@@ -272,7 +283,11 @@ mod tests {
         for _ in 0..20 {
             ctl.on_estimate(600, 0);
         }
-        assert_eq!(ctl.capacity_kbps(), 4_500, "the idle source must not fight the controller");
+        assert_eq!(
+            ctl.capacity_kbps(),
+            4_500,
+            "the idle source must not fight the controller"
+        );
     }
 
     // The idle case still accepts an increase if the estimator raises.
@@ -304,7 +319,10 @@ mod tests {
         }
         // Content turns busy while the estimate is still stale.
         let cmd = ctl.on_estimate(750, 4_400);
-        assert_eq!(cmd.target_kbps, 4_500, "the collapsed estimate must not crush the burst");
+        assert_eq!(
+            cmd.target_kbps, 4_500,
+            "the collapsed estimate must not crush the burst"
+        );
         // The estimate climbs back; capacity holds the whole way up.
         for estimate in [900, 1_500, 2_500, 3_900] {
             assert_eq!(ctl.on_estimate(estimate, 4_400).target_kbps, 4_500);
@@ -380,10 +398,19 @@ mod tests {
             "no rate until the first window completes"
         );
         // 250 kB over 500 ms is 4_000 kbit/s.
-        assert_eq!(sampler.sample(250_000, t0 + Duration::from_millis(500)), 4_000);
+        assert_eq!(
+            sampler.sample(250_000, t0 + Duration::from_millis(500)),
+            4_000
+        );
         // Mid-window reads return the last completed window's rate.
-        assert_eq!(sampler.sample(260_000, t0 + Duration::from_millis(600)), 4_000);
+        assert_eq!(
+            sampler.sample(260_000, t0 + Duration::from_millis(600)),
+            4_000
+        );
         // A near-idle window drops the rate promptly.
-        assert_eq!(sampler.sample(260_000, t0 + Duration::from_millis(1_000)), 160);
+        assert_eq!(
+            sampler.sample(260_000, t0 + Duration::from_millis(1_000)),
+            160
+        );
     }
 }

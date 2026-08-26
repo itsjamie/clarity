@@ -673,9 +673,7 @@ impl RoomState {
             .as_ref()
             .filter(|peer| peer.peer_id == source.peer_id)
             .or_else(|| self.viewers.get(&source.peer_id))
-            .is_some_and(|peer| {
-                peer.connected && peer.connection_id == source.connection_id
-            });
+            .is_some_and(|peer| peer.connected && peer.connection_id == source.connection_id);
         if active {
             Ok(())
         } else {
@@ -994,13 +992,9 @@ impl RoomState {
     }
 
     fn disconnect(&mut self, session: &ConnectionIdentity, now: OffsetDateTime) {
-        if let Some(presenter) = self
-            .presenter
-            .as_mut()
-            .filter(|peer| {
-                peer.peer_id == session.peer_id && peer.connection_id == session.connection_id
-            })
-        {
+        if let Some(presenter) = self.presenter.as_mut().filter(|peer| {
+            peer.peer_id == session.peer_id && peer.connection_id == session.connection_id
+        }) {
             presenter.connected = false;
             presenter.outbound = None;
             presenter.disconnected_at = Some(now);
@@ -1395,9 +1389,11 @@ async fn run_room_actor(
         }
     }
     if let Some(events) = events {
-        let _ = events.send(RoomEvent::Closed {
-            room_id: room.room_id.clone(),
-        }).await;
+        let _ = events
+            .send(RoomEvent::Closed {
+                room_id: room.room_id.clone(),
+            })
+            .await;
     }
 }
 
@@ -1413,11 +1409,15 @@ async fn emit_room_update(
     if current == *announced {
         return;
     }
-    if events.send(RoomEvent::Updated {
-        room_id: room.room_id.clone(),
-        approved_viewers: current.0,
-        sharing_state: current.1,
-    }).await.is_ok() {
+    if events
+        .send(RoomEvent::Updated {
+            room_id: room.room_id.clone(),
+            approved_viewers: current.0,
+            sharing_state: current.1,
+        })
+        .await
+        .is_ok()
+    {
         *announced = current;
     }
 }
@@ -1524,10 +1524,12 @@ mod tests {
 
         assert!(room.snapshot(now).presenter_connected);
         assert_eq!(
-            room.ensure_connection(&first).expect_err("superseded connection"),
+            room.ensure_connection(&first)
+                .expect_err("superseded connection"),
             DomainError::AuthorizationDenied
         );
-        room.ensure_connection(&second).expect("replacement connection");
+        room.ensure_connection(&second)
+            .expect("replacement connection");
     }
 
     #[test]
@@ -1627,8 +1629,12 @@ mod tests {
         );
         // A token that never matched anything stays a plain failure.
         assert_eq!(
-            room.resume(&SecretString::from("wrong-token".to_owned()), session().0, now)
-                .expect_err("wrong token"),
+            room.resume(
+                &SecretString::from("wrong-token".to_owned()),
+                session().0,
+                now
+            )
+            .expect_err("wrong token"),
             DomainError::AuthenticationFailed
         );
     }
@@ -1653,7 +1659,13 @@ mod tests {
             .authenticate_presenter(&presenter_secret, session().0, now)
             .expect("presenter auth");
         let viewer = room
-            .authenticate_viewer(&viewer_secret, Some(" Viewer ".into()), None, session().0, now)
+            .authenticate_viewer(
+                &viewer_secret,
+                Some(" Viewer ".into()),
+                None,
+                session().0,
+                now,
+            )
             .expect("viewer auth");
         assert_eq!(room.snapshot(now).pending_viewers.len(), 1);
         room.approve(&presenter.peer_id, &viewer.peer_id, "approve".into(), now)
@@ -1715,7 +1727,9 @@ mod tests {
         .expect("rename");
 
         assert_eq!(
-            room.snapshot(now).approved_viewers[0].display_name.as_deref(),
+            room.snapshot(now).approved_viewers[0]
+                .display_name
+                .as_deref(),
             Some("Jamie Viewer")
         );
         assert!(matches!(
