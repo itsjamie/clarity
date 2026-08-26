@@ -33,9 +33,11 @@ pub fn title_bar(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
             // move once, on drag start — sending it every dragged() frame
             // re-grabs the window each frame so it never releases on mouse-up.
             // `click_and_drag` makes egui wait for movement before calling it a
-            // drag, which is what keeps double-click distinguishable.
+            // drag, which is what keeps double-click distinguishable. Compose
+            // the raw senses so this decorative handle stays out of keyboard
+            // focus traversal.
             let bar = ui.max_rect();
-            let resp = ui.interact(bar, ui.id().with("drag"), Sense::click_and_drag());
+            let resp = ui.interact(bar, ui.id().with("drag"), title_bar_sense());
             if resp.drag_started() {
                 hand_to_compositor(&ctx, egui::ViewportCommand::StartDrag);
             }
@@ -66,6 +68,23 @@ pub fn title_bar(ui: &mut egui::Ui, pal: &Palette, state: &mut AppState) {
                 });
             });
         });
+}
+
+fn title_bar_sense() -> Sense {
+    Sense::CLICK | Sense::DRAG
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decorative_title_bar_handle_is_not_keyboard_focusable() {
+        let sense = title_bar_sense();
+        assert!(sense.senses_click());
+        assert!(sense.senses_drag());
+        assert!(!sense.is_focusable());
+    }
 }
 
 /// The right-click menu on the title bar: what the OS menu would offer if it
