@@ -329,6 +329,74 @@ async fn authenticate_viewer(
 }
 
 #[tokio::test]
+async fn superseded_presenter_socket_cannot_act_or_disconnect_its_replacement() {
+    let server = spawn_server().await;
+    let room = create_public_room(&server, 3).await;
+    let (mut old_presenter, old_peer_id, _) = authenticate_presenter(&server, &room).await;
+    let (mut replacement, replacement_peer_id, _) = authenticate_presenter(&server, &room).await;
+    assert_eq!(old_peer_id, replacement_peer_id);
+
+    send_client(
+        &mut old_presenter,
+        ClientMessage::IceRefresh {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "stale-ice-refresh".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_server(&mut old_presenter).await,
+        ServerMessage::Error {
+            code: ErrorCode::AuthorizationDenied,
+            ..
+        }
+    ));
+
+    send_client(
+        &mut old_presenter,
+        ClientMessage::RoomClose {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "stale-close".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_server(&mut old_presenter).await,
+        ServerMessage::Error {
+            code: ErrorCode::AuthorizationDenied,
+            ..
+        }
+    ));
+
+    old_presenter.close(None).await.expect("close stale socket");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    send_client(
+        &mut replacement,
+        ClientMessage::RoomUpdateCapacity {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "replacement-capacity".into(),
+            maximum_viewers: 2,
+        },
+    )
+    .await;
+    assert!(matches!(
+        wait_for(&mut replacement, |message| matches!(
+            message,
+            ServerMessage::RoomCapacityUpdated {
+                request_id,
+                maximum_viewers: 2,
+                ..
+            } if request_id == "replacement-capacity"
+        ))
+        .await,
+        ServerMessage::RoomCapacityUpdated {
+            maximum_viewers: 2,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn health_readiness_room_creation_and_origin_policy() {
     let server = spawn_server().await;
     let client = Client::new();
