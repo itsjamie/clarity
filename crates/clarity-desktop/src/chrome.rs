@@ -290,7 +290,9 @@ pub fn resize_grips(ctx: &egui::Context) {
         .movable(false)
         .show(ctx, |ui| {
             for (i, (rect, dir, cursor)) in grips.iter().enumerate() {
-                let resp = ui.interact(*rect, ui.id().with(i), Sense::drag());
+                // Pointer-only: the focusable drag sense would add eight
+                // invisible, non-actionable stops to keyboard traversal.
+                let resp = ui.interact(*rect, ui.id().with(i), Sense::DRAG);
                 if resp.hovered() {
                     ctx.set_cursor_icon(*cursor);
                 }
