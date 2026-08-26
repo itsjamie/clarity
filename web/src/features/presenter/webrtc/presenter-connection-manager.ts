@@ -63,6 +63,19 @@ interface PeerEntry {
   metrics?: WebRtcMetrics;
 }
 
+interface SourceReplacementSnapshot {
+  entry: PeerEntry;
+  videoTrack: MediaStreamTrack | null;
+  audioSender: RTCRtpSender | null;
+  audioTrack: MediaStreamTrack | null;
+  negotiatedWithTrack: boolean;
+  mode: CaptureMode;
+  adaptation: QualityAdaptationController;
+  profile: EncodingProfile;
+  lastAdaptationReason: string;
+  videoParameters: RTCRtpSendParameters;
+}
+
 export class PresenterConnectionManager {
   readonly #options: PresenterConnectionManagerOptions;
   readonly #entries = new Map<string, PeerEntry>();
@@ -102,8 +115,12 @@ export class PresenterConnectionManager {
   }
 
   public async setSource(stream: MediaStream): Promise<string[]> {
-    this.#source = stream;
-    const failures = this.#entries.size > 0 ? await this.replaceSource(stream) : [];
+    let failures: string[] = [];
+    if (this.#entries.size > 0) {
+      failures = await this.replaceSource(stream);
+    } else {
+      this.#source = stream;
+    }
     for (const peerId of this.#approvedViewerIds) {
       if (!this.#entries.has(peerId)) await this.#createPeer(peerId);
     }
@@ -128,6 +145,10 @@ export class PresenterConnectionManager {
     this.#displayNames.delete(peerId);
     const entry = this.#entries.get(peerId);
     if (!entry) return;
+    this.#discardEntry(entry);
+  }
+
+  #discardEntry(entry: PeerEntry): void {
     if (entry.recoveryTimer !== null) window.clearTimeout(entry.recoveryTimer);
     entry.stats.stop();
     if (entry.chat) {
@@ -138,8 +159,8 @@ export class PresenterConnectionManager {
     entry.connection.onconnectionstatechange = null;
     entry.connection.close();
     entry.queuedCandidates.length = 0;
-    this.#entries.delete(peerId);
-    this.#options.diagnostics.record('peer.removed', { peerId });
+    if (this.#entries.get(entry.peerId) === entry) this.#entries.delete(entry.peerId);
+    this.#options.diagnostics.record('peer.removed', { peerId: entry.peerId });
   }
 
   /** Sends a chat envelope to every viewer whose channel is open. */
@@ -182,8 +203,11 @@ export class PresenterConnectionManager {
     const videoTrack = stream.getVideoTracks()[0];
     if (!videoTrack) throw new Error('The replacement source has no video track.');
     const audioTrack = stream.getAudioTracks()[0] ?? null;
-    const failures: string[] = [];
+    const failures = new Set<string>();
+    const replacements: SourceReplacementSnapshot[] = [];
     for (const entry of this.#entries.values()) {
+      const snapshot = this.#sourceSnapshot(entry);
+      replacements.push(snapshot);
       try {
         let needsOffer = !entry.negotiatedWithTrack;
         await entry.videoSender.replaceTrack(videoTrack);
@@ -223,11 +247,75 @@ export class PresenterConnectionManager {
         }
         this.#emit(entry);
       } catch {
-        failures.push(entry.peerId);
+        failures.add(entry.peerId);
+        break;
       }
     }
-    if (failures.length === 0) this.#source = stream;
-    return failures;
+    if (failures.size === 0) {
+      this.#source = stream;
+      return [];
+    }
+    for (const snapshot of replacements.reverse()) {
+      try {
+        await this.#rollbackSource(snapshot);
+      } catch {
+        failures.add(snapshot.entry.peerId);
+        this.#options.diagnostics.record('source.rollback-failed', {
+          peerId: snapshot.entry.peerId,
+        });
+        // Never leave a live entry pointing at the replacement stream that the
+        // capture manager is about to stop. Rebuild it from the old source.
+        this.#discardEntry(snapshot.entry);
+        if (
+          this.#approvedViewerIds.has(snapshot.entry.peerId) &&
+          !this.#entries.has(snapshot.entry.peerId)
+        ) {
+          try {
+            await this.#createPeer(snapshot.entry.peerId);
+          } catch {
+            this.#options.diagnostics.record('peer.rebuild-failed', {
+              peerId: snapshot.entry.peerId,
+            });
+          }
+        }
+      }
+    }
+    return [...failures];
+  }
+
+  #sourceSnapshot(entry: PeerEntry): SourceReplacementSnapshot {
+    return {
+      entry,
+      videoTrack: entry.videoSender.track,
+      audioSender: entry.audioSender,
+      audioTrack: entry.audioSender?.track ?? null,
+      negotiatedWithTrack: entry.negotiatedWithTrack,
+      mode: entry.mode,
+      adaptation: entry.adaptation,
+      profile: entry.profile,
+      lastAdaptationReason: entry.lastAdaptationReason,
+      videoParameters: entry.videoSender.getParameters(),
+    };
+  }
+
+  async #rollbackSource(snapshot: SourceReplacementSnapshot): Promise<void> {
+    const { entry } = snapshot;
+    if (this.#entries.get(entry.peerId) !== entry) return;
+    await entry.videoSender.replaceTrack(snapshot.videoTrack);
+    if (entry.audioSender !== snapshot.audioSender) {
+      if (entry.audioSender) entry.connection.removeTrack(entry.audioSender);
+      entry.audioSender = snapshot.audioSender;
+    }
+    await snapshot.audioSender?.replaceTrack(snapshot.audioTrack);
+    const negotiationChanged = entry.negotiatedWithTrack !== snapshot.negotiatedWithTrack;
+    entry.negotiatedWithTrack = snapshot.negotiatedWithTrack;
+    entry.mode = snapshot.mode;
+    entry.adaptation = snapshot.adaptation;
+    entry.profile = snapshot.profile;
+    entry.lastAdaptationReason = snapshot.lastAdaptationReason;
+    await entry.videoSender.setParameters(snapshot.videoParameters);
+    if (negotiationChanged) await this.#negotiate(entry, false);
+    this.#emit(entry);
   }
 
   public async pauseSource(): Promise<string[]> {

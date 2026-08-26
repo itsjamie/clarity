@@ -41,6 +41,31 @@ describe('presenter connection manager reconfiguration', () => {
     manager.stopAll();
   });
 
+  it('rolls every sender back when one viewer rejects a source replacement', async () => {
+    const manager = createManager();
+    const previousTrack = videoTrack('previous');
+    const replacementTrack = videoTrack('replacement');
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.setSource(streamWith(previousTrack));
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+    const [first, second] = FakePeerConnection.instances;
+    second!.videoSender.replaceTrack.mockRejectedValueOnce(new Error('replacement failed'));
+
+    await expect(manager.setSource(streamWith(replacementTrack))).resolves.toEqual(['viewer-2']);
+
+    expect(first!.videoSender.track).toBe(previousTrack);
+    expect(second!.videoSender.track).toBe(previousTrack);
+    expect(first!.videoSender.replaceTrack).toHaveBeenCalledWith(replacementTrack);
+    expect(first!.videoSender.replaceTrack).toHaveBeenLastCalledWith(previousTrack);
+
+    // The manager also retains the previous source for peers created after the
+    // failed operation, rather than committing a split-brain source state.
+    await manager.addApprovedViewer('viewer-3');
+    expect(FakePeerConnection.instances[2]!.videoSender.track).toBe(previousTrack);
+    manager.stopAll();
+  });
+
   it('reapplies the high profile when fixed quality is selected for an active sender', async () => {
     const manager = createManager();
     await manager.configure(iceConfiguration, 'motion', 'adaptive', 'auto');
@@ -203,8 +228,12 @@ class FakeSender {
     },
   );
   readonly replaceTrack = vi.fn<(track: MediaStreamTrack | null) => Promise<void>>(
-    () => Promise.resolve(),
+    (track) => {
+      this.track = track;
+      return Promise.resolve();
+    },
   );
+  public track: MediaStreamTrack | null = null;
   #parameters = { encodings: [{}] } as RTCRtpSendParameters;
 
   public getParameters(): RTCRtpSendParameters {
@@ -255,8 +284,13 @@ class FakePeerConnection {
     return this.chatChannel as unknown as RTCDataChannel;
   }
 
-  public addTransceiver(): RTCRtpTransceiver {
+  public addTransceiver(trackOrKind?: MediaStreamTrack | string): RTCRtpTransceiver {
+    this.videoSender.track = typeof trackOrKind === 'string' ? null : trackOrKind ?? null;
     return { sender: this.videoSender } as unknown as RTCRtpTransceiver;
+  }
+
+  public removeTrack(sender: RTCRtpSender): void {
+    if (sender === (this.videoSender as unknown as RTCRtpSender)) this.videoSender.track = null;
   }
 
   public createOffer(): Promise<RTCSessionDescriptionInit> {
