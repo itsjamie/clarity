@@ -30,6 +30,17 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
+      - name: Install native Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libglib2.0-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libwayland-dev \
+            pkg-config
+
       - name: Generate protocol
         run: cargo run --locked -p clarity-xtask -- export-protocol
 

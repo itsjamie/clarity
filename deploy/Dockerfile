@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.95-bookworm AS protocol-builder
+FROM rust:1.96-bookworm AS protocol-builder
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -18,7 +18,7 @@ COPY web ./
 COPY --from=protocol-builder /workspace/web/src/generated ./src/generated
 RUN pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
-FROM rust:1.95-bookworm AS rust-builder
+FROM rust:1.96-bookworm AS rust-builder
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
