@@ -95,11 +95,12 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
     // Challenge → Hello → Ready handshake.
     let challenge = new_challenge();
     if outbound_tx
-        .try_send(PresenceServerMessage::Challenge {
+        .send(PresenceServerMessage::Challenge {
             protocol_version: PROTOCOL_VERSION,
             server_timestamp: now_string(),
             nonce: challenge.clone(),
         })
+        .await
         .is_err()
     {
         finish(outbound_tx, writer).await;
@@ -118,18 +119,32 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
     {
         Ok(code) => code,
         Err(reason) => {
-            let _ = outbound_tx.try_send(presence_error(reason));
+            let _ = outbound_tx.send(presence_error(reason)).await;
             finish(outbound_tx, writer).await;
             return;
         }
     };
 
-    let _ = outbound_tx.try_send(PresenceServerMessage::Ready {
+    let session_id = match state
+        .presence
+        .connect(code.clone(), outbound_tx.clone())
+        .await
+    {
+        Ok(session_id) => session_id,
+        Err(_) => {
+            finish(outbound_tx, writer).await;
+            return;
+        }
+    };
+    if outbound_tx.send(PresenceServerMessage::Ready {
         protocol_version: PROTOCOL_VERSION,
         server_timestamp: now_string(),
         code: code.clone(),
-    });
-    let session_id = state.presence.connect(code.clone(), outbound_tx.clone());
+    }).await.is_err() {
+        let _ = state.presence.disconnect(session_id).await;
+        finish(outbound_tx, writer).await;
+        return;
+    }
     debug!(%code, "presence session authenticated");
 
     let mut limiter = SessionRateLimiter::per_minute(state.config.signal_rate_limit);
@@ -149,28 +164,44 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
             break;
         }
         let Ok(parsed) = serde_json::from_str::<PresenceClientMessage>(&text) else {
-            let _ = outbound_tx.try_send(presence_error(Reject::Malformed));
+            let _ = outbound_tx.send(presence_error(Reject::Malformed)).await;
             continue;
         };
         if !limiter.check() {
-            let _ = outbound_tx.try_send(presence_error(Reject::RateLimited));
+            let _ = outbound_tx.send(presence_error(Reject::RateLimited)).await;
             continue;
         }
         match parsed {
             PresenceClientMessage::Subscribe { codes, .. } => {
-                state.presence.subscribe(session_id, sanitize_subscriptions(codes));
+                if state
+                    .presence
+                    .subscribe(session_id, sanitize_subscriptions(codes))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
             PresenceClientMessage::Announce {
                 hosting,
                 presenter_secret,
                 ..
             } => match hosting {
-                None => state.presence.announce(session_id, None),
+                None => {
+                    if state.presence.announce(session_id, None).await.is_err() {
+                        break;
+                    }
+                }
                 Some(room) => {
                     if let Some(hosting) =
                         authoritative_hosting(&state, room, presenter_secret).await
+                        && state
+                            .presence
+                            .announce(session_id, Some(hosting))
+                            .await
+                            .is_err()
                     {
-                        state.presence.announce(session_id, Some(hosting));
+                        break;
                     }
                     // An unknown or closed room, an unproven announcer, or a
                     // viewer URL pointing away from this deployment cannot be
@@ -183,7 +214,7 @@ async fn handle_presence(socket: WebSocket, state: AppState) {
         }
     }
 
-    state.presence.disconnect(session_id);
+    let _ = state.presence.disconnect(session_id).await;
     debug!(%code, "presence session disconnected");
     finish(outbound_tx, writer).await;
 }
