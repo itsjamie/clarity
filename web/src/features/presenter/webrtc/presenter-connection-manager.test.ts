@@ -11,6 +11,7 @@ const iceConfiguration: IceConfiguration = {
 describe('presenter connection manager reconfiguration', () => {
   beforeEach(() => {
     FakePeerConnection.instances.length = 0;
+    FakePeerConnection.failDataChannel = false;
     vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
   });
 
@@ -97,6 +98,45 @@ describe('presenter connection manager reconfiguration', () => {
     await manager.setSource(streamWith(videoTrack('first')));
     expect(FakePeerConnection.instances).toHaveLength(1);
     manager.stopAll();
+  });
+
+  it('deduplicates concurrent creation requests for the same viewer', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    await Promise.all([
+      manager.addApprovedViewer('viewer-1'),
+      manager.addApprovedViewer('viewer-1'),
+    ]);
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(manager.statuses).toHaveLength(1);
+    manager.stopAll();
+  });
+
+  it('cancels an in-flight creation when the viewer is removed', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    const creating = manager.addApprovedViewer('viewer-1');
+    manager.removeViewer('viewer-1');
+    await creating;
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances[0]!.connectionState).toBe('closed');
+    expect(manager.statuses).toEqual([]);
+    manager.stopAll();
+  });
+
+  it('closes a peer when synchronous channel setup fails', async () => {
+    FakePeerConnection.failDataChannel = true;
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+
+    await expect(manager.addApprovedViewer('viewer-1')).rejects.toThrow('channel setup failed');
+
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakePeerConnection.instances[0]?.connectionState).toBe('closed');
   });
 
   it('re-offers an idle-born peer when the first source arrives, then replaces silently', async () => {
@@ -235,6 +275,7 @@ class FakeDataChannel {
 
 class FakePeerConnection {
   static readonly instances: FakePeerConnection[] = [];
+  static failDataChannel = false;
 
   readonly videoSender = new FakeSender();
   chatChannel!: FakeDataChannel;
@@ -251,6 +292,7 @@ class FakePeerConnection {
   }
 
   public createDataChannel(label: string): RTCDataChannel {
+    if (FakePeerConnection.failDataChannel) throw new Error('channel setup failed');
     this.chatChannel = new FakeDataChannel(label);
     return this.chatChannel as unknown as RTCDataChannel;
   }
