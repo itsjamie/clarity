@@ -61,6 +61,34 @@ describe('presenter connection manager reconfiguration', () => {
     manager.stopAll();
   });
 
+  it('applies refreshed ICE servers to every active connection', async () => {
+    const manager = createManager();
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+    const refreshed: IceConfiguration = {
+      expiresAt: '2099-01-01T01:00:00Z',
+      iceServers: [{
+        urls: ['turn:relay.example.test:3478'],
+        username: 'fresh-user',
+        credential: 'fresh-credential',
+      }],
+    };
+
+    await manager.configure(refreshed, 'text', 'adaptive', 'auto');
+
+    for (const connection of FakePeerConnection.instances) {
+      expect(connection.setConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+        iceServers: [{
+          urls: ['turn:relay.example.test:3478'],
+          username: 'fresh-user',
+          credential: 'fresh-credential',
+        }],
+      }));
+    }
+    manager.stopAll();
+  });
+
   it('pauses senders without closing peers and connects late viewers after resume', async () => {
     const manager = createManager();
     const resumedTrack = videoTrack('resumed');
@@ -245,9 +273,20 @@ class FakePeerConnection {
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
+  readonly setConfiguration = vi.fn<(configuration: RTCConfiguration) => void>(
+    (configuration) => {
+      this.#configuration = configuration;
+    },
+  );
+  #configuration: RTCConfiguration;
 
-  public constructor() {
+  public constructor(configuration: RTCConfiguration = {}) {
+    this.#configuration = configuration;
     FakePeerConnection.instances.push(this);
+  }
+
+  public getConfiguration(): RTCConfiguration {
+    return this.#configuration;
   }
 
   public createDataChannel(label: string): RTCDataChannel {

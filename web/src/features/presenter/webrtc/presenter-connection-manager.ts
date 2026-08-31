@@ -95,6 +95,12 @@ export class PresenterConnectionManager {
     this.#mode = mode;
     this.#qualityStrategy = strategy;
     this.#codecMode = codec;
+    for (const entry of this.#entries.values()) {
+      entry.connection.setConfiguration({
+        ...entry.connection.getConfiguration(),
+        iceServers: toRtcIceServers(iceConfiguration),
+      });
+    }
     if (!strategyChanged) return;
     await Promise.all(
       [...this.#entries.values()].map((entry) => this.#applyStrategy(entry, strategy)),

@@ -85,6 +85,29 @@ describe('viewer peer connection track adoption', () => {
 
     expect(onStream).toHaveBeenCalledTimes(callsAtClose);
   });
+
+  it('applies refreshed ICE servers to the active connection', async () => {
+    const { viewer, connection } = await connectedViewer();
+    const refreshed: IceConfiguration = {
+      expiresAt: '2099-01-01T01:00:00Z',
+      iceServers: [{
+        urls: ['turn:relay.example.test:3478'],
+        username: 'fresh-user',
+        credential: 'fresh-credential',
+      }],
+    };
+
+    viewer.configure(refreshed);
+
+    expect(connection.setConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      iceServers: [{
+        urls: ['turn:relay.example.test:3478'],
+        username: 'fresh-user',
+        credential: 'fresh-credential',
+      }],
+    }));
+    viewer.close();
+  });
 });
 
 async function connectedViewer(): Promise<{
@@ -160,9 +183,20 @@ class FakePeerConnection {
   ondatachannel: ((event: RTCDataChannelEvent) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
+  readonly setConfiguration = vi.fn<(configuration: RTCConfiguration) => void>(
+    (configuration) => {
+      this.#configuration = configuration;
+    },
+  );
+  #configuration: RTCConfiguration;
 
-  public constructor() {
+  public constructor(configuration: RTCConfiguration = {}) {
+    this.#configuration = configuration;
     FakePeerConnection.instances.push(this);
+  }
+
+  public getConfiguration(): RTCConfiguration {
+    return this.#configuration;
   }
 
   public fireTrack(track: FakeTrack, streams: FakeMediaStream[]): void {

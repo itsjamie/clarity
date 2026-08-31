@@ -35,6 +35,12 @@ export class ViewerPeerConnection {
 
   public configure(configuration: IceConfiguration): void {
     this.#iceConfiguration = configuration;
+    if (this.#connection) {
+      this.#connection.setConfiguration({
+        ...this.#connection.getConfiguration(),
+        iceServers: toRtcIceServers(configuration),
+      });
+    }
   }
 
   public async acceptOffer(presenterPeerId: string, sdp: string): Promise<void> {
@@ -89,11 +95,7 @@ export class ViewerPeerConnection {
   #createConnection(presenterPeerId: string): RTCPeerConnection {
     if (!this.#iceConfiguration) throw new Error('ICE configuration is unavailable.');
     const connection = new RTCPeerConnection({
-      iceServers: this.#iceConfiguration.iceServers.map((server) => ({
-        urls: server.urls,
-        ...(server.username ? { username: server.username } : {}),
-        ...(server.credential ? { credential: server.credential } : {}),
-      })),
+      iceServers: toRtcIceServers(this.#iceConfiguration),
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
       iceTransportPolicy: forceRelayEnabled() ? 'relay' : 'all',
@@ -166,4 +168,12 @@ export class ViewerPeerConnection {
       channel.onopen = flush;
     }
   }
+}
+
+function toRtcIceServers(configuration: IceConfiguration): RTCIceServer[] {
+  return configuration.iceServers.map((server) => ({
+    urls: server.urls,
+    ...(server.username ? { username: server.username } : {}),
+    ...(server.credential ? { credential: server.credential } : {}),
+  }));
 }
