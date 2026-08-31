@@ -1,6 +1,8 @@
 use clarity_protocol::{ApiError, CreateRoomRequest, CreateRoomResponse, RoomAccessPolicy};
 use url::Url;
 
+use crate::url_authority;
+
 #[derive(Debug, Clone)]
 pub struct RoomOptions {
     pub maximum_viewers: u8,
@@ -35,11 +37,7 @@ pub fn server_endpoints(server: &Url) -> Result<ServerEndpoints, RoomError> {
         "http" => "ws",
         _ => return Err(RoomError::InvalidServer),
     };
-    let host = server.host_str().ok_or(RoomError::InvalidServer)?;
-    let authority = match server.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
-    };
+    let authority = url_authority(server).ok_or(RoomError::InvalidServer)?;
     Ok(ServerEndpoints {
         signaling_url: format!("{ws_scheme}://{authority}/api/v1/ws"),
         origin: format!("{}://{authority}", server.scheme()),
@@ -101,6 +99,10 @@ mod tests {
             server_endpoints(&Url::parse("https://share.example.com").unwrap()).unwrap();
         assert_eq!(endpoints.signaling_url, "wss://share.example.com/api/v1/ws");
         assert_eq!(endpoints.origin, "https://share.example.com");
+
+        let endpoints = server_endpoints(&Url::parse("http://[::1]:3000").unwrap()).unwrap();
+        assert_eq!(endpoints.signaling_url, "ws://[::1]:3000/api/v1/ws");
+        assert_eq!(endpoints.origin, "http://[::1]:3000");
 
         assert!(matches!(
             server_endpoints(&Url::parse("ftp://example.com").unwrap()),

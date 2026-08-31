@@ -148,12 +148,7 @@ pub(crate) fn ice_refresh_retry() -> std::time::Duration {
 pub(crate) fn server_host(url: &str) -> String {
     url::Url::parse(url)
         .ok()
-        .and_then(|url| {
-            url.host_str().map(|host| match url.port() {
-                Some(port) => format!("{host}:{port}"),
-                None => host.to_owned(),
-            })
-        })
+        .and_then(|url| crate::url_authority(&url))
         .unwrap_or_default()
 }
 
@@ -441,6 +436,14 @@ mod tests {
         assert_eq!(reconnect_delay(5, 0.5), Duration::from_millis(10_000));
         assert_eq!(reconnect_delay(50, 0.5), Duration::from_millis(10_000));
         assert_eq!(reconnect_delay(50, 9.0), Duration::from_millis(12_500));
+    }
+
+    #[test]
+    fn identity_host_preserves_ipv6_brackets() {
+        assert_eq!(
+            server_host("wss://[2001:db8::1]:8443/api/v1/ws"),
+            "[2001:db8::1]:8443"
+        );
     }
 
     #[test]

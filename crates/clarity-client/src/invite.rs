@@ -1,6 +1,8 @@
 use secrecy::SecretString;
 use url::Url;
 
+use crate::url_authority;
+
 /// A parsed viewer invitation. The secret never appears in `Debug` output and
 /// must not be logged; it leaves this struct only inside the authentication
 /// message.
@@ -37,7 +39,7 @@ pub fn parse_invitation(input: &str) -> Result<Invitation, InvitationError> {
         "http" => "ws",
         _ => return Err(InvitationError::UnsupportedScheme),
     };
-    let host = url.host_str().ok_or(InvitationError::Invalid)?;
+    let authority = url_authority(&url).ok_or(InvitationError::Invalid)?;
     let mut segments = url
         .path_segments()
         .ok_or(InvitationError::UnrecognizedPath)?
@@ -50,10 +52,6 @@ pub fn parse_invitation(input: &str) -> Result<Invitation, InvitationError> {
         .fragment()
         .filter(|fragment| !fragment.is_empty())
         .ok_or(InvitationError::MissingSecret)?;
-    let authority = match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
-    };
     Ok(Invitation {
         room_id: room_id.to_owned(),
         secret: SecretString::from(secret.to_owned()),
@@ -86,6 +84,13 @@ mod tests {
         let invitation = parse_invitation("http://127.0.0.1:5173/r/room#secret").unwrap();
         assert_eq!(invitation.signaling_url, "ws://127.0.0.1:5173/api/v1/ws");
         assert_eq!(invitation.origin, "http://127.0.0.1:5173");
+    }
+
+    #[test]
+    fn preserves_ipv6_brackets_in_connection_endpoints() {
+        let invitation = parse_invitation("http://[::1]:5173/r/room#secret").unwrap();
+        assert_eq!(invitation.signaling_url, "ws://[::1]:5173/api/v1/ws");
+        assert_eq!(invitation.origin, "http://[::1]:5173");
     }
 
     #[test]

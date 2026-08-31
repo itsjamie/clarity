@@ -15,6 +15,22 @@ pub mod rooms;
 pub mod signaling;
 pub mod viewer;
 
+use url::{Host, Url};
+
+/// The URL's canonical `host[:port]`, including the brackets an IPv6
+/// authority requires and omitting default ports as [`Url::port`] does.
+fn url_authority(url: &Url) -> Option<String> {
+    let host = match url.host()? {
+        Host::Domain(host) => host.to_owned(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => format!("[{address}]"),
+    };
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
 /// Media types that appear in this crate's public session APIs, re-exported so
 /// callers need not depend on `clarity-media` directly.
 pub use clarity_media::{

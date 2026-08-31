@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clarity_core::{MAXIMUM_VIEWERS_LIMIT, RoomActorConfig, TurnConfig};
 use secrecy::{ExposeSecret, SecretString};
 use time::Duration;
-use url::Url;
+use url::{Host, Url};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -231,10 +231,26 @@ impl AppConfig {
 /// The URL's `host[:port]`, with default ports omitted — the same
 /// canonicalization clients apply to the URL they dialed.
 fn url_authority(url: &Url) -> Option<String> {
-    url.host_str().map(|host| match url.port() {
+    let host = match url.host()? {
+        Host::Domain(host) => host.to_owned(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => format!("[{address}]"),
+    };
+    Some(match url.port() {
         Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
+        None => host,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_authority_preserves_ipv6_brackets() {
+        let url = Url::parse("https://[2001:db8::1]:8443").expect("URL");
+        assert_eq!(url_authority(&url).as_deref(), Some("[2001:db8::1]:8443"));
+    }
 }
 
 fn env_string(name: &str, default: &str) -> String {
