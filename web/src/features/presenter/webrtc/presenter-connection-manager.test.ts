@@ -165,6 +165,32 @@ describe('presenter connection manager reconfiguration', () => {
     }
     manager.stopAll();
   });
+
+  it('refreshes existing signaling routes with ICE restart offers', async () => {
+    const sendSignal = vi.fn<(message: ClientMessage) => void>();
+    const manager = new PresenterConnectionManager({
+      sendSignal,
+      onStatus: vi.fn(),
+      onChat: vi.fn(),
+      diagnostics: new DiagnosticsCollector(),
+    });
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.addApprovedViewer('viewer-1');
+    await manager.addApprovedViewer('viewer-2');
+    sendSignal.mockClear();
+
+    await expect(manager.refreshSignalingRoutes(['viewer-1'])).resolves.toEqual([]);
+
+    expect(sendSignal).toHaveBeenCalledTimes(1);
+    expect(sendSignal).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'signal:offer',
+      destinationPeerId: 'viewer-1',
+      iceRestart: true,
+    }));
+    expect(FakePeerConnection.instances[0]?.restartIce).toHaveBeenCalledOnce();
+    expect(FakePeerConnection.instances[1]?.restartIce).not.toHaveBeenCalled();
+    manager.stopAll();
+  });
 });
 
 function createManager(
@@ -245,6 +271,7 @@ class FakePeerConnection {
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   oniceconnectionstatechange: (() => void) | null = null;
+  readonly restartIce = vi.fn();
 
   public constructor() {
     FakePeerConnection.instances.push(this);

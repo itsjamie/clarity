@@ -61,6 +61,7 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
     requestRefresh: () => this.#requestIceRefresh(),
   });
   #iceConfiguration: IceConfiguration | null = null;
+  #selfPeerId: string | null = null;
   #pausing = false;
   #starting = false;
   #captureOperationRevision = 0;
@@ -474,6 +475,10 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
   async #handleMessage(message: ServerMessage): Promise<void> {
     switch (message.type) {
       case 'auth:succeeded': {
+        const freshIdentity = this.#selfPeerId !== null && this.#selfPeerId !== message.peerId;
+        const peersToRefresh = freshIdentity
+          ? this.#connections.statuses.map((status) => status.peerId)
+          : [];
         const sharingStateToSync = this.#sharingStateToSync;
         this.#iceConfiguration = message.iceConfiguration;
         this.#credentialRefresh.schedule(message.iceConfiguration.expiresAt);
@@ -484,6 +489,18 @@ export class PresenterSession implements ExternalStateStore<PresenterSessionStat
           this.#state.codecMode,
         );
         await this.#applySnapshot(message.snapshot);
+        this.#selfPeerId = message.peerId;
+        if (peersToRefresh.length > 0) {
+          // A rejected resume falls back to presenter-secret authentication,
+          // which gives this signaling session a new peer id. Existing media
+          // can keep flowing, but every viewer still routes recovery signals
+          // to the old id until a new offer teaches it the replacement route.
+          const failures = await this.#connections.refreshSignalingRoutes(peersToRefresh);
+          this.#diagnostics.record('session.reauthenticated', {
+            refreshedPeers: peersToRefresh.length - failures.length,
+            failedPeers: failures.length,
+          });
+        }
         if (sharingStateToSync) {
           this.#patch({ sharingPaused: sharingStateToSync === 'paused' });
           try {

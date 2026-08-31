@@ -178,6 +178,16 @@ export class PresenterConnectionManager {
     this.#emit(entry);
   }
 
+  /**
+   * Re-offers the peers that existed before a presenter re-authenticated
+   * under a new signaling id. Newly discovered peers already receive a fresh
+   * initial offer and must not be negotiated twice.
+   */
+  public async refreshSignalingRoutes(peerIds: readonly string[]): Promise<string[]> {
+    const results = await Promise.allSettled(peerIds.map((peerId) => this.restartIce(peerId)));
+    return results.flatMap((result, index) => result.status === 'rejected' ? [peerIds[index]!] : []);
+  }
+
   public async replaceSource(stream: MediaStream): Promise<string[]> {
     const videoTrack = stream.getVideoTracks()[0];
     if (!videoTrack) throw new Error('The replacement source has no video track.');
