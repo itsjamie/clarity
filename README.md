@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Rust 1.95+" src="https://img.shields.io/badge/Rust-1.95%2B-000000?logo=rust">
+  <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-000000?logo=rust">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-20232a?logo=react">
   <img alt="WebRTC" src="https://img.shields.io/badge/media-WebRTC-333333?logo=webrtc">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-7c3aed">
@@ -67,7 +67,7 @@ System audio is included only when the browser and selected source provide it. C
 
 ### Prerequisites
 
-- Rust 1.95 or newer with `rustfmt` and `clippy`
+- Rust 1.96 or newer with `rustfmt` and `clippy`
 - GStreamer 1.22+ development libraries with the base, good, and bad plugin sets (used by the native client crates); native screen sharing additionally uses the PipeWire GStreamer plugin and an xdg-desktop-portal at runtime
 - Node.js 24
 - pnpm 11.9 through Corepack
