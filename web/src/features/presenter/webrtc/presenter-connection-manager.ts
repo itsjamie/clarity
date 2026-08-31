@@ -48,6 +48,7 @@ interface PresenterConnectionManagerOptions {
 interface PeerEntry {
   peerId: string;
   connection: RTCPeerConnection;
+  videoTransceiver: RTCRtpTransceiver;
   videoSender: RTCRtpSender;
   audioSender: RTCRtpSender | null;
   chat: RTCDataChannel | null;
@@ -91,14 +92,21 @@ export class PresenterConnectionManager {
     codec: CodecMode,
   ): Promise<void> {
     const strategyChanged = this.#qualityStrategy !== strategy;
+    const codecChanged = this.#codecMode !== codec;
     this.#iceConfiguration = iceConfiguration;
     this.#mode = mode;
     this.#qualityStrategy = strategy;
     this.#codecMode = codec;
-    if (!strategyChanged) return;
-    await Promise.all(
-      [...this.#entries.values()].map((entry) => this.#applyStrategy(entry, strategy)),
-    );
+    if (strategyChanged) {
+      await Promise.all(
+        [...this.#entries.values()].map((entry) => this.#applyStrategy(entry, strategy)),
+      );
+    }
+    if (codecChanged) {
+      await Promise.all(
+        [...this.#entries.values()].map((entry) => this.#applyCodec(entry, codec)),
+      );
+    }
   }
 
   public async setSource(stream: MediaStream): Promise<string[]> {
@@ -278,6 +286,7 @@ export class PresenterConnectionManager {
     const entry: PeerEntry = {
       peerId,
       connection,
+      videoTransceiver: transceiver,
       videoSender: transceiver.sender,
       audioSender,
       chat,
@@ -375,6 +384,17 @@ export class PresenterConnectionManager {
       unsupportedParameters: result.unsupported,
     });
     this.#emit(entry);
+  }
+
+  async #applyCodec(entry: PeerEntry, codec: CodecMode): Promise<void> {
+    const result = await this.#codecs.applyPreference(entry.videoTransceiver, codec);
+    if (!result.applied) return;
+    await this.#negotiate(entry, false);
+    this.#options.diagnostics.record('codec.preference-changed', {
+      peerId: entry.peerId,
+      requested: codec,
+      selected: result.selected,
+    });
   }
 
   async #recover(entry: PeerEntry): Promise<void> {

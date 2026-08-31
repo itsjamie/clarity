@@ -12,6 +12,15 @@ describe('presenter connection manager reconfiguration', () => {
   beforeEach(() => {
     FakePeerConnection.instances.length = 0;
     vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
+    vi.stubGlobal('RTCRtpSender', {
+      getCapabilities: () => ({
+        codecs: [
+          { mimeType: 'video/VP8', clockRate: 90_000 },
+          { mimeType: 'video/H264', clockRate: 90_000 },
+        ],
+        headerExtensions: [],
+      }),
+    });
   });
 
   afterEach(() => {
@@ -165,6 +174,33 @@ describe('presenter connection manager reconfiguration', () => {
     }
     manager.stopAll();
   });
+
+  it('renegotiates active viewers when the codec preference changes', async () => {
+    const sendSignal = vi.fn<(message: ClientMessage) => void>();
+    const manager = new PresenterConnectionManager({
+      sendSignal,
+      onStatus: vi.fn(),
+      onChat: vi.fn(),
+      diagnostics: new DiagnosticsCollector(),
+    });
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'auto');
+    await manager.addApprovedViewer('viewer-1');
+    const connection = activeConnection();
+    sendSignal.mockClear();
+    connection.transceiver.setCodecPreferences.mockClear();
+
+    await manager.configure(iceConfiguration, 'text', 'adaptive', 'H264');
+
+    expect(connection.transceiver.setCodecPreferences).toHaveBeenCalledOnce();
+    expect(connection.transceiver.setCodecPreferences.mock.lastCall?.[0]?.[0]?.mimeType)
+      .toBe('video/H264');
+    expect(sendSignal).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'signal:offer',
+      destinationPeerId: 'viewer-1',
+      iceRestart: false,
+    }));
+    manager.stopAll();
+  });
 });
 
 function createManager(
@@ -237,6 +273,10 @@ class FakePeerConnection {
   static readonly instances: FakePeerConnection[] = [];
 
   readonly videoSender = new FakeSender();
+  readonly transceiver = {
+    sender: this.videoSender,
+    setCodecPreferences: vi.fn<(codecs: RTCRtpCodec[]) => void>(),
+  };
   chatChannel!: FakeDataChannel;
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
@@ -256,7 +296,7 @@ class FakePeerConnection {
   }
 
   public addTransceiver(): RTCRtpTransceiver {
-    return { sender: this.videoSender } as unknown as RTCRtpTransceiver;
+    return this.transceiver as unknown as RTCRtpTransceiver;
   }
 
   public createOffer(): Promise<RTCSessionDescriptionInit> {
