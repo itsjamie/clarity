@@ -12,6 +12,8 @@ mod presence;
 mod presenter;
 mod room;
 mod screens;
+#[cfg(windows)]
+mod source_picker;
 mod state;
 mod theme;
 mod ui;
@@ -192,8 +194,23 @@ impl ClarityApp {
             match command {
                 state::PresenterCommand::OpenRoom => self.open_room(ctx),
                 state::PresenterCommand::StartShare | state::PresenterCommand::ChangeSource => {
+                    let source = share_source();
+                    // Windows has no system picker: the app lists displays
+                    // and windows itself, and the choice returns as
+                    // `ShareTarget`.
+                    #[cfg(windows)]
+                    if self.presenter.is_some() && matches!(source, presenter::Source::Screen) {
+                        self.state.open_source_picker();
+                        continue;
+                    }
                     if let Some(link) = &self.presenter {
-                        link.share(share_source());
+                        link.share(source);
+                    }
+                }
+                #[cfg(windows)]
+                state::PresenterCommand::ShareTarget(target) => {
+                    if let Some(link) = &self.presenter {
+                        link.share(presenter::Source::Target(target));
                     }
                 }
                 state::PresenterCommand::PauseShare => {
@@ -497,6 +514,10 @@ impl eframe::App for ClarityApp {
         if self.state.palette_open {
             screens::command_palette(&ctx, &self.pal, &mut self.state);
         }
+        #[cfg(windows)]
+        if self.state.source_picker.is_some() {
+            source_picker::source_picker_modal(&ctx, &self.pal, &mut self.state);
+        }
 
         self.capture.tick(&ctx);
     }
@@ -710,6 +731,10 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.join_open = false;
             state.theatre = false;
             state.name_edit_open = false;
+            #[cfg(windows)]
+            {
+                state.source_picker = None;
+            }
         }
         // `T` toggles theatre in the room, when not typing in a field.
         if state.screen == Screen::Room

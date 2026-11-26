@@ -1,12 +1,15 @@
 //! The audio-exclusion leak test, end to end against the real audio graph:
-//! two synthetic PipeWire playback streams stand in for a voice call (440 Hz)
-//! and music (1320 Hz), the default-audio policy resolves what to share, the
-//! media engine captures exactly that, and tone detection on the decoded
-//! audio proves the excluded application is inaudible to the viewer.
+//! two fake applications stand in for a voice call (440 Hz) and music
+//! (1320 Hz), the default-audio policy resolves what to share, the media
+//! engine captures exactly that, and tone detection on the decoded audio
+//! proves the excluded application is inaudible to the viewer.
 //!
-//! Runs only where PipeWire, `pw-dump`, `gst-launch-1.0`, and `pipewiresink`
-//! exist (skips silently otherwise). The fake streams play two quiet tones on
-//! the default output for the duration of the test.
+//! On Linux the fakes are PipeWire playback streams; it runs only where
+//! PipeWire, `pw-dump`, `gst-launch-1.0`, and `pipewiresink` exist. On
+//! Windows they are separate processes playing through WASAPI, captured with
+//! process loopback; it runs where `gst-launch-1.0` and `wasapi2sink` are on
+//! `PATH`. It skips silently otherwise. The fakes play quiet tones on the
+//! default output for the duration of the test.
 
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -24,40 +27,81 @@ const VOICE_HZ: f32 = 440.0;
 const MUSIC_HZ: f32 = 1320.0;
 const SAMPLE_RATE: f32 = 48_000.0;
 
-/// A fake application playing a quiet tone; killed on drop. It plays through
-/// pipewire-pulse (`pulsesink`), exactly like the real applications the
-/// exclusion targets — a `pipewiresink` stream would carry the right
-/// properties but never gets scheduled for capture consumers on current
-/// PipeWire, so it cannot stand in for one.
-struct FakeApp(Child);
+/// A fake application playing a quiet tone; killed on drop.
+struct FakeApp {
+    child: Child,
+    /// The renamed launcher copy (Windows), removed once the process exits.
+    #[cfg(windows)]
+    executable: std::path::PathBuf,
+}
+
+/// The `gst-launch-1.0` arguments for a quiet live tone into `sink`.
+fn tone_arguments(freq: f32, sink: &[String]) -> Vec<String> {
+    let mut arguments: Vec<String> = [
+        "-q",
+        "audiotestsrc",
+        "is-live=true",
+        &format!("freq={freq}"),
+        "volume=0.05",
+        "!",
+        "audioconvert",
+        "!",
+    ]
+    .iter()
+    .map(|argument| (*argument).to_owned())
+    .collect();
+    arguments.extend_from_slice(sink);
+    arguments
+}
 
 impl FakeApp {
+    /// Plays through pipewire-pulse (`pulsesink`), exactly like the real
+    /// applications the exclusion targets — a `pipewiresink` stream would
+    /// carry the right properties but never gets scheduled for capture
+    /// consumers on current PipeWire, so it cannot stand in for one.
+    #[cfg(not(windows))]
     fn spawn(name: &str, freq: f32) -> Option<Self> {
+        let sink = ["pulsesink".to_owned(), format!("client-name={name}")];
         Command::new("gst-launch-1.0")
-            .args([
-                "-q",
-                "audiotestsrc",
-                "is-live=true",
-                &format!("freq={freq}"),
-                "volume=0.05",
-                "!",
-                "audioconvert",
-                "!",
-                "pulsesink",
-                &format!("client-name={name}"),
-            ])
+            .args(tone_arguments(freq, &sink))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .ok()
-            .map(Self)
+            .map(|child| Self { child })
+    }
+
+    /// Windows names an application by its executable, so each fake is a
+    /// copy of `gst-launch-1.0.exe` renamed to `name`, playing through
+    /// WASAPI like any desktop application.
+    #[cfg(windows)]
+    fn spawn(name: &str, freq: f32) -> Option<Self> {
+        let launcher = std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|directory| directory.join("gst-launch-1.0.exe"))
+            .find(|candidate| candidate.is_file())?;
+        let directory =
+            std::env::temp_dir().join(format!("clarity-fake-apps-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).ok()?;
+        let executable = directory.join(format!("{name}.exe"));
+        std::fs::copy(&launcher, &executable).ok()?;
+        let child = Command::new(&executable)
+            .args(tone_arguments(freq, &["wasapi2sink".to_owned()]))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        Some(Self { child, executable })
     }
 }
 
 impl Drop for FakeApp {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_file(&self.executable);
+        }
     }
 }
 
@@ -79,30 +123,40 @@ fn tone_power(samples: &[f32], freq: f32) -> f32 {
         / (len * len)
 }
 
+fn succeeds(command: &str, args: &[&str]) -> bool {
+    Command::new(command)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
 fn environment_ready() -> bool {
-    let has = |command: &str, args: &[&str]| {
-        Command::new(command)
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    };
-    has("pw-dump", &[]) && has("gst-inspect-1.0", &["--exists", "pipewiresink"])
+    succeeds("pw-dump", &[]) && succeeds("gst-inspect-1.0", &["--exists", "pipewiresink"])
+}
+
+/// The full file name: `Command` appends `.exe` only to names without an
+/// extension, and `gst-inspect-1.0` reads as having one (`.0`).
+#[cfg(windows)]
+fn environment_ready() -> bool {
+    succeeds("gst-inspect-1.0.exe", &["--exists", "wasapi2sink"])
 }
 
 /// The reported leak, reproduced and pinned: with the voice app excluded by
 /// name, its tone must not reach the viewer while the music's tone does —
-/// through the real chain of graph resolution, per-stream PipeWire capture,
-/// Opus over WebRTC, and decode.
+/// through the real chain of graph resolution, per-application capture
+/// (PipeWire streams, or Windows process loopback), Opus over WebRTC, and
+/// decode.
 #[tokio::test]
 async fn excluded_application_audio_never_reaches_the_viewer() {
     // SAFETY: set before the media stack spawns any env-reading threads;
     // this test is alone in its process.
     unsafe { std::env::set_var("CLARITY_MEDIA_HEADLESS", "1") };
     if !environment_ready() {
-        eprintln!("skipping: PipeWire tooling is unavailable here");
+        eprintln!("skipping: the audio tooling is unavailable here");
         return;
     }
     let _voice = match FakeApp::spawn("ClarityFakeVoice", VOICE_HZ) {

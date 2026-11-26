@@ -36,8 +36,12 @@ use crate::state::{
 /// What the presenter shares.
 #[derive(Clone, Copy)]
 pub enum Source {
-    /// The real desktop portal picker (a monitor or window).
+    /// The real desktop portal picker (a monitor or window). Windows has no
+    /// system picker: the app opens its own and shares through `Target`.
     Screen,
+    /// A display or window chosen in the app's own source picker.
+    #[cfg(windows)]
+    Target(clarity_client::CaptureTarget),
     /// A local test pattern, for verifying the pipeline without the picker.
     Synthetic,
 }
@@ -384,6 +388,7 @@ async fn run(
         None => None,
     };
 
+    let (audio, audio_exclude) = system_audio(config.include_system_audio);
     let (updates, mut updates_rx) = tokio::sync::mpsc::unbounded_channel::<PresenterUpdate>();
     let session = PresenterSession::start(
         PresenterSessionConfig {
@@ -392,18 +397,8 @@ async fn run(
             signaling_url: endpoints.signaling_url,
             origin: endpoints.origin,
             source,
-            // System audio is the watched per-stream mix, never the raw
-            // monitor: the watchdog fills it within half a second and keeps
-            // the default voice-chat exclusion out of it for the whole
-            // share, however late a call starts.
-            audio: if config.include_system_audio {
-                AudioCapture::Streams { targets: vec![] }
-            } else {
-                AudioCapture::Disabled
-            },
-            audio_exclude: config
-                .include_system_audio
-                .then(clarity_client::audio_apps::default_excluded),
+            audio,
+            audio_exclude,
             video_codecs: config.video_codecs.clone(),
             frame_rate: config.profile.fps(),
             capture_ceiling: Some(config.max_capture),
@@ -482,6 +477,25 @@ fn forward_update(update: PresenterUpdate, emit: &impl Fn(Event)) {
     }
 }
 
+/// The audio that accompanies a share, and the exclusion list the session's
+/// watchdog keeps out of it.
+///
+/// System audio is the watched per-application mix, never the raw output
+/// monitor: the watchdog fills it within half a second and keeps the default
+/// voice-chat exclusion out of it for the whole share, however late a call
+/// starts. On Linux each application is a PipeWire stream; on Windows a
+/// process captured with process loopback.
+fn system_audio(include: bool) -> (AudioCapture, Option<Vec<String>>) {
+    if include {
+        (
+            AudioCapture::Streams { targets: vec![] },
+            Some(clarity_client::audio_apps::default_excluded()),
+        )
+    } else {
+        (AudioCapture::Disabled, None)
+    }
+}
+
 async fn open_source(source: Source, profile: CaptureProfile) -> Result<SourceConfig, String> {
     match source {
         Source::Synthetic => Ok(SourceConfig::Synthetic(SyntheticSource {
@@ -489,15 +503,33 @@ async fn open_source(source: Source, profile: CaptureProfile) -> Result<SourceCo
             height: 720,
             frame_rate: profile.fps(),
         })),
-        Source::Screen => CaptureStream::open(CaptureRequest {
-            show_cursor: true,
-            restore_token: None,
-            remember: false,
-        })
+        Source::Screen => {
+            open_screen(CaptureRequest {
+                show_cursor: true,
+                restore_token: None,
+                remember: false,
+                #[cfg(windows)]
+                target: None,
+            })
+            .await
+        }
+        #[cfg(windows)]
+        Source::Target(target) => {
+            open_screen(CaptureRequest {
+                show_cursor: true,
+                target: Some(target),
+                ..Default::default()
+            })
+            .await
+        }
+    }
+}
+
+async fn open_screen(request: CaptureRequest) -> Result<SourceConfig, String> {
+    CaptureStream::open(request)
         .await
         .map(SourceConfig::Screen)
-        .map_err(|error| format!("Screen capture did not start: {error}")),
-    }
+        .map_err(|error| format!("Screen capture did not start: {error}"))
 }
 
 /// The adaptive bitrate ceiling per profile. Generous headroom so high-detail

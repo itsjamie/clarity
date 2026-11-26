@@ -68,7 +68,7 @@ System audio is included only when the browser and selected source provide it. C
 ### Prerequisites
 
 - Rust 1.95 or newer with `rustfmt` and `clippy`
-- GStreamer 1.22+ development libraries with the base, good, and bad plugin sets (used by the native client crates); native screen sharing additionally uses the PipeWire GStreamer plugin and an xdg-desktop-portal at runtime
+- GStreamer 1.22+ development libraries with the base, good, and bad plugin sets (used by the native client crates); on Linux, native screen sharing additionally uses the PipeWire GStreamer plugin and an xdg-desktop-portal at runtime. For Windows, see [Native client on Windows](#native-client-on-windows)
 - Node.js 24
 - pnpm 11.9 through Corepack
 
@@ -96,6 +96,29 @@ pnpm dev
 ```
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173). Vite proxies API and WebSocket traffic to the Rust service at `127.0.0.1:3000`. Browsers treat loopback addresses as secure contexts, so screen capture works without local TLS.
+
+### Native client on Windows
+
+The native desktop client (`clarity-gui`) and the `clarity` CLI build on Windows 10 1903 or newer with the MSVC Rust toolchain.
+
+1. Install GStreamer 1.24 or newer for MSVC x86_64, including the development files. `winget install gstreamerproject.gstreamer` installs to `C:\Program Files\gstreamer\1.0\msvc_x86_64` and ships `pkg-config.exe`.
+2. Point the build at it and put its DLLs on `PATH` (in PowerShell):
+
+   ```powershell
+   $gst = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+   $env:PKG_CONFIG_PATH = "$gst\lib\pkgconfig"
+   $env:PATH = "$gst\bin;$env:PATH"
+   cargo run -p clarity-desktop --release
+   ```
+
+   The GStreamer `bin` folder must also be on `PATH` when `clarity-gui.exe` runs outside this shell.
+
+How Windows differs from Linux:
+
+- **Picking a source.** Windows has no system screen-share picker, so "Share my screen" opens Clarity's own list of displays and windows. Capture uses Windows Graphics Capture (`d3d11screencapturesrc`). The CLI shares the primary display.
+- **System audio** works as on Linux: each application that is playing is captured separately (Windows process loopback, which needs Windows 11 or build 20348+), voice chat stays out by default, and applications that start playing mid-share join within half a second. Process loopback captures a whole process tree, so an application that launched an excluded one (Discord started from Steam, say) is left out too rather than risk carrying the call. On older Windows 10 builds the share is silent instead of falling back to the full output mix; `clarity present --all-audio` shares everything.
+- **Video playback** renders through the egui texture path. The native video overlay (`CLARITY_NATIVE_VIDEO`) is Wayland-only.
+- **Local state** lives in `%LOCALAPPDATA%\Clarity` unless `CLARITY_CONFIG_DIR` is set.
 
 ## Self-hosting
 

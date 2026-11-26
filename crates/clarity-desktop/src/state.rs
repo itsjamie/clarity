@@ -261,6 +261,10 @@ pub enum PresenterCommand {
     Leave,
     Approve(String),
     Deny(String),
+    /// Share the display or window chosen in the app's own source picker
+    /// (Windows has no system picker), for a first share or a source change.
+    #[cfg(windows)]
+    ShareTarget(clarity_client::CaptureTarget),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -353,6 +357,10 @@ pub struct AppState {
     pub create_open: bool,
     /// The join-by-link modal, launched from the sidebar.
     pub join_open: bool,
+    /// The source picker's list while it is open (Windows, where "Share my
+    /// screen" has no system dialog to open).
+    #[cfg(windows)]
+    pub source_picker: Option<Vec<clarity_client::CaptureSource>>,
     /// The room link typed into the join modal, and the last parse error.
     pub join_draft: String,
     pub join_error: Option<String>,
@@ -437,6 +445,8 @@ impl AppState {
             palette_open: false,
             create_open: false,
             join_open: false,
+            #[cfg(windows)]
+            source_picker: None,
             join_draft: String::new(),
             join_error: None,
             room_tab: RoomTab::Chat,
@@ -531,6 +541,22 @@ impl AppState {
         self.presenter_commands.push(PresenterCommand::ChangeSource);
     }
 
+    /// Opens (or refreshes) the source picker with the displays and windows
+    /// that can be shared right now.
+    #[cfg(windows)]
+    pub fn open_source_picker(&mut self) {
+        self.palette_open = false;
+        self.source_picker = Some(clarity_client::capture_sources());
+    }
+
+    /// Closes the picker and shares its choice.
+    #[cfg(windows)]
+    pub fn share_target(&mut self, target: clarity_client::CaptureTarget) {
+        self.source_picker = None;
+        self.presenter_commands
+            .push(PresenterCommand::ShareTarget(target));
+    }
+
     pub fn pause_share(&mut self) {
         self.presenter_commands.push(PresenterCommand::PauseShare);
     }
@@ -568,10 +594,11 @@ impl AppState {
 }
 
 /// The hostname, as a friendly default for a new identity's device name.
+/// Windows names it `COMPUTERNAME`.
 fn default_device_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|h| !h.is_empty())
+    ["HOSTNAME", "COMPUTERNAME"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|h| !h.is_empty()))
         .unwrap_or_else(|| "This device".to_owned())
 }
 
@@ -623,7 +650,8 @@ impl AppState {
     ///
     /// Screens: `home` `room` `friends` `settings` `onboarding`.
     /// Overlays and variants: `palette` (command palette), `theatre` (room,
-    /// sidebar hidden), `motion` (new-room Motion profile).
+    /// sidebar hidden), `motion` (new-room Motion profile), `picker` (the
+    /// Windows source picker, listing the real displays and windows).
     pub fn apply_scene(&mut self, spec: &str) {
         for token in spec.split(['.', ',', ' ', ':']).filter(|t| !t.is_empty()) {
             match token.to_ascii_lowercase().as_str() {
@@ -640,6 +668,8 @@ impl AppState {
                 "theatre" | "theater" => self.theatre = true,
                 "motion" => self.new_room_motion = true,
                 "text" => self.new_room_motion = false,
+                #[cfg(windows)]
+                "picker" => self.open_source_picker(),
                 other => eprintln!("clarity: unknown scene token `{other}` ignored"),
             }
         }
