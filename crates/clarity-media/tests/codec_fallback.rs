@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use clarity_media::{
     AudioCapture, Broadcast, BroadcastConfig, BroadcastEvent, EncoderSettings, Playback,
-    PlaybackConfig, PlaybackEvent, SourceConfig, SyntheticSource,
+    PlaybackConfig, PlaybackEvent, SourceConfig, SyntheticSource, VideoCodecId,
+    video_codec_inventory,
 };
 use clarity_protocol::IceConfiguration;
 
@@ -24,6 +25,20 @@ async fn falls_back_when_the_viewer_cannot_decode_the_top_codecs() {
     unsafe {
         std::env::set_var("CLARITY_MEDIA_HEADLESS", "1");
         std::env::set_var("CLARITY_DECODE_DENY", "AV1,H265");
+    }
+
+    // The fallback starts from AV1 and lands on H264, both NVENC encoders.
+    // Without them (any machine without an NVIDIA GPU, CI runners included)
+    // the broadcast still starts, offering only VP9 and VP8, so there is no
+    // fallback to test.
+    let inventory = video_codec_inventory();
+    let encodes = |codec| {
+        inventory
+            .iter()
+            .any(|capability| capability.codec == codec && capability.available)
+    };
+    if !(encodes(VideoCodecId::Av1) && encodes(VideoCodecId::H264)) {
+        return;
     }
 
     let (broadcast, mut broadcast_events) = match Broadcast::start(BroadcastConfig {
@@ -44,8 +59,7 @@ async fn falls_back_when_the_viewer_cannot_decode_the_top_codecs() {
         capture_ceiling: None,
     }) {
         Ok(started) => started,
-        // A machine without the media runtime cannot run this test; neither
-        // can one without the hardware encoders the fallback starts from.
+        // A machine without the media runtime cannot run this test.
         Err(_) => return,
     };
     broadcast
