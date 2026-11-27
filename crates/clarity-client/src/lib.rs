@@ -22,3 +22,6 @@ pub use clarity_media::{
     NativeHandle, NativeVideoSurface, SenderStats, SourceConfig, StreamStats, SyntheticSource,
     VideoCodecCapability, VideoCodecId, VideoFrame, video_codec_inventory,
 };
+/// Windows has no system capture picker; the GUI lists these itself.
+#[cfg(windows)]
+pub use clarity_media::{CaptureSource, CaptureTarget, capture_sources};

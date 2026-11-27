@@ -555,7 +555,8 @@ fn write_report(state: &AppState) -> Result<std::path::PathBuf, String> {
 }
 
 /// Where exported reports land: `$XDG_DOWNLOAD_DIR` when set, `~/Downloads`
-/// when it exists, home otherwise (temp as the last resort).
+/// when it exists, home otherwise (temp as the last resort). Home is
+/// `%USERPROFILE%` on Windows, which usually has no `HOME`.
 fn download_dir() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
         let dir = std::path::PathBuf::from(dir);
@@ -563,7 +564,7 @@ fn download_dir() -> std::path::PathBuf {
             return dir;
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         let downloads = std::path::Path::new(&home).join("Downloads");
         if downloads.is_dir() {
             return downloads;

@@ -3,8 +3,10 @@
 //! values and ask the store to persist the matching one.
 //!
 //! Files live under `$CLARITY_CONFIG_DIR`, else `$XDG_CONFIG_HOME/clarity`,
-//! else `~/.config/clarity`. Writes are atomic (temp file + rename); the
-//! identity file is written `0600` since it holds the private key.
+//! else (Windows) `%LOCALAPPDATA%\Clarity`, else `~/.config/clarity`. Writes
+//! are atomic (temp file + rename); on Unix the identity file is written
+//! `0600` since it holds the private key, and on Windows the per-user
+//! local AppData folder is already private to the account.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,6 +98,13 @@ fn config_dir() -> Result<PathBuf, StoreError> {
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(xdg).join("clarity"));
+    }
+    // Windows usually has no `HOME`. Local rather than roaming AppData: the
+    // identity is this device's key pair and must not follow a roaming
+    // profile to other machines.
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(local).join("Clarity"));
     }
     let home = std::env::var_os("HOME").ok_or(StoreError::NoConfigDir)?;
     Ok(PathBuf::from(home).join(".config").join("clarity"))

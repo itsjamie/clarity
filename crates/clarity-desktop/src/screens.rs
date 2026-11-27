@@ -457,7 +457,7 @@ fn try_join(state: &mut AppState) {
 }
 
 /// A small "×" close button for a modal's header.
-fn modal_close(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+pub(crate) fn modal_close(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(24.0), Sense::click());
     if resp.hovered() {
         ui.painter()

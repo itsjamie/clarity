@@ -415,6 +415,9 @@ async fn open_capture(
         show_cursor,
         restore_token,
         remember,
+        // Windows has no system picker; the CLI shares the primary display.
+        #[cfg(windows)]
+        target: None,
     })
     .await
     .map_err(|error| match error {

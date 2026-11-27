@@ -26,6 +26,13 @@ const STATS_INTERVAL: Duration = Duration::from_secs(2);
 const IDLE_WIDTH: i32 = 640;
 const IDLE_HEIGHT: i32 = 360;
 const IDLE_FRAME_RATE: i32 = 4;
+/// The element that captures a real screen: PipeWire behind the desktop
+/// portal on Linux, Windows Graphics Capture through the d3d11 plugin on
+/// Windows.
+#[cfg(not(windows))]
+const SCREEN_SOURCE: &str = "pipewiresrc";
+#[cfg(windows)]
+const SCREEN_SOURCE: &str = "d3d11screencapturesrc";
 /// The fixed Opus bitrate reserved for audio on each viewer's transport; the
 /// congestion estimate covers the whole transport, so this is subtracted
 /// before the remainder is given to the video encoder.
@@ -431,12 +438,13 @@ pub enum SourceConfig {
 pub enum AudioCapture {
     Disabled,
     /// Everything the presenter hears — the default output's monitor for a
-    /// real capture, a soft test tone for the synthetic source, and silence
-    /// while idle. The head follows the video source across swaps, so a
+    /// real capture (WASAPI loopback on Windows), a soft test tone for the
+    /// synthetic source, and silence while idle. The head follows the video source across swaps, so a
     /// broadcast opened idle picks up the real monitor when sharing starts.
     SystemMix,
     /// Capture and mix specific playback streams, each a PipeWire target
-    /// object (object serial or node name). One target shares a single
+    /// object (object serial or node name) on Linux, or a process id on
+    /// Windows (process loopback of that process tree). One target shares a single
     /// application; several express a system mix with some applications
     /// excluded — the caller assembles the set. Targets are a snapshot at
     /// start: streams appearing later are not added, and every listed stream
@@ -634,6 +642,28 @@ struct Shared {
     /// and the branch leaving the pipeline; tracking the elements here keeps
     /// those stragglers attributable so they cannot end the share.
     dismantling: Mutex<Vec<gst::Element>>,
+    /// Offer/answer pacing per viewer; see [`OfferPacing`]. Its own lock,
+    /// never held across a call into GStreamer.
+    offer_pacing: Mutex<HashMap<String, OfferPacing>>,
+}
+
+/// Keeps at most one offer per viewer awaiting its answer.
+///
+/// Renegotiation is requested from several places — the explicit initial
+/// offer, webrtcbin's `on-negotiation-needed`, the re-offer once the
+/// negotiated video branch has caps — and they can land close together. A
+/// late source (WASAPI loopback, say) delivers its caps after the initial
+/// offer is created but before it is installed as the local description, and
+/// webrtcbin then asks for another offer. Two offers in flight leave the
+/// viewer answering the wrong one and the connection never forms. Requests
+/// made while an offer is outstanding fold into one follow-up round once its
+/// answer is applied; that offer reflects everything requested meanwhile.
+#[derive(Debug, Default)]
+struct OfferPacing {
+    /// An offer has been created and its answer has not been applied yet.
+    outstanding: bool,
+    /// Negotiation was requested while the offer was outstanding.
+    again: bool,
 }
 
 /// Registers a mix's leg elements for bus-error containment.
@@ -715,7 +745,7 @@ impl Broadcast {
             .map_err(|error| BroadcastError::Init(error.to_string()))?;
         let source_element = match &config.source {
             SourceConfig::Synthetic(_) | SourceConfig::Idle => "videotestsrc",
-            SourceConfig::Screen(_) => "pipewiresrc",
+            SourceConfig::Screen(_) => SCREEN_SOURCE,
         };
         let codecs = VideoCodec::resolve_ranking(&config.video_codecs);
         let video_codec = codecs[0];
@@ -748,6 +778,7 @@ impl Broadcast {
             ended: AtomicBool::new(false),
             audio_leg_names: Mutex::new(std::collections::HashSet::new()),
             dismantling: Mutex::new(Vec::new()),
+            offer_pacing: Mutex::new(HashMap::new()),
         });
 
         let pipeline = gst::Pipeline::new();
@@ -759,7 +790,8 @@ impl Broadcast {
         pipeline.use_clock(Some(&gst::SystemClock::obtain()));
         let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
         let audio_mode = AudioHeadMode::of(&config.source);
-        let (head, capture) = build_source_head(config.source)?;
+        let frame_rate = config.frame_rate.clamp(1, 120) as i32;
+        let (head, capture) = build_source_head(config.source, frame_rate)?;
         // The source's frames are normalized once, ahead of the tee: converted
         // out of the capture buffer pool immediately (compositors stop
         // delivering when their small pool is held downstream), scaled to at
@@ -784,7 +816,6 @@ impl Broadcast {
         // constant rate the idle bitrate budget is spent sharpening within a
         // second, after which duplicated frames encode as skips that cost
         // almost nothing.
-        let frame_rate = config.frame_rate.clamp(1, 120) as i32;
         let videorate = gst::ElementFactory::make("videorate")
             .build()
             .map_err(start_error)?;
@@ -931,7 +962,7 @@ impl Broadcast {
     /// the per-viewer encoders and `webrtcbin` bins are never touched.
     pub fn replace_source(&self, source: SourceConfig) -> Result<(), BroadcastError> {
         let audio_mode = AudioHeadMode::of(&source);
-        let (new_head, new_capture) = build_source_head(source)?;
+        let (new_head, new_capture) = build_source_head(source, self.frame_rate)?;
         let raw_format = self.shared.top_codec().raw_format();
         let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
 
@@ -1850,20 +1881,25 @@ impl Broadcast {
         }
         let shared = Arc::clone(&self.shared);
         let peer = peer_id.to_owned();
+        let settled_webrtc = webrtc.clone();
         let applied = gst::Promise::with_change_func(move |reply| {
             if reply.is_err() {
                 tracing::warn!("a viewer answer could not be applied");
+                answer_settled(&settled_webrtc, &shared, &peer);
                 return;
             }
-            let mut viewers = shared.viewers.lock().expect("viewer lock");
-            if let Some(entry) = viewers.get_mut(&peer) {
-                entry.remote_description_set = true;
-                for (mline, candidate) in entry.queued_candidates.drain(..) {
-                    entry
-                        .webrtc
-                        .emit_by_name::<()>("add-ice-candidate", &[&mline, &candidate]);
+            {
+                let mut viewers = shared.viewers.lock().expect("viewer lock");
+                if let Some(entry) = viewers.get_mut(&peer) {
+                    entry.remote_description_set = true;
+                    for (mline, candidate) in entry.queued_candidates.drain(..) {
+                        entry
+                            .webrtc
+                            .emit_by_name::<()>("add-ice-candidate", &[&mline, &candidate]);
+                    }
                 }
             }
+            answer_settled(&settled_webrtc, &shared, &peer);
         });
         webrtc.emit_by_name::<()>("set-remote-description", &[&answer, &applied]);
         Ok(())
@@ -2027,7 +2063,9 @@ impl Broadcast {
             let _ = pipeline.set_state(gst::State::Null);
             let _ = bus_thread.join();
             // The capture grant outlives the pipeline that reads from it
-            // and is revoked only once the pipeline has stopped.
+            // and is revoked only once the pipeline has stopped. (Windows
+            // capture holds no grant, so there this drop is a no-op.)
+            #[cfg_attr(windows, allow(clippy::drop_non_drop))]
             drop(capture);
         });
     }
@@ -2134,9 +2172,25 @@ fn chat_send_fits_buffer(buffered_amount: u64, payload_bytes: usize) -> bool {
     })
 }
 
+/// Creates and sends an offer to one viewer, unless one is already awaiting
+/// its answer; then the request is folded into a single follow-up round (see
+/// [`OfferPacing`]). An ICE restart is never held back: recovery cannot wait
+/// on an answer that may never come, and the restart offer supersedes the
+/// outstanding one and reflects the current state.
 fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_restart: bool) {
     if shared.ended.load(Ordering::SeqCst) {
         return;
+    }
+    {
+        let mut pacing = shared.offer_pacing.lock().expect("offer pacing lock");
+        let state = pacing.entry(peer_id.to_owned()).or_default();
+        if ice_restart {
+            state.again = false;
+        } else if state.outstanding {
+            state.again = true;
+            return;
+        }
+        state.outstanding = true;
     }
     let options = ice_restart.then(|| {
         gst::Structure::builder("options")
@@ -2146,6 +2200,7 @@ fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_res
     let events = shared.events.clone();
     let peer = peer_id.to_owned();
     let webrtc_clone = webrtc.clone();
+    let pacing_shared = Arc::clone(shared);
     let promise = gst::Promise::with_change_func(move |reply| {
         let offer = match reply {
             Ok(Some(structure)) => structure
@@ -2155,6 +2210,16 @@ fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_res
         };
         let Some(offer) = offer else {
             tracing::warn!("an offer could not be created for a viewer");
+            // No offer is out, so nothing will be answered; let the next
+            // request through rather than waiting forever.
+            if let Some(state) = pacing_shared
+                .offer_pacing
+                .lock()
+                .expect("offer pacing lock")
+                .get_mut(&peer)
+            {
+                *state = OfferPacing::default();
+            }
             return;
         };
         webrtc_clone.emit_by_name::<()>("set-local-description", &[&offer, &None::<gst::Promise>]);
@@ -2167,6 +2232,21 @@ fn negotiate(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str, ice_res
         }
     });
     webrtc.emit_by_name::<()>("create-offer", &[&options, &promise]);
+}
+
+/// Closes the viewer's outstanding offer once its answer has been applied
+/// (or rejected), and runs the round that was requested meanwhile, if any.
+fn answer_settled(webrtc: &gst::Element, shared: &Arc<Shared>, peer_id: &str) {
+    let again = {
+        let mut pacing = shared.offer_pacing.lock().expect("offer pacing lock");
+        pacing.get_mut(peer_id).is_some_and(|state| {
+            state.outstanding = false;
+            std::mem::take(&mut state.again)
+        })
+    };
+    if again {
+        negotiate(webrtc, shared, peer_id, false);
+    }
 }
 
 /// Waits for ICE gathering to settle before teardown; dismantling a
@@ -2198,6 +2278,11 @@ fn remove_viewer_branch(
         .display_names
         .lock()
         .expect("display name lock")
+        .remove(peer_id);
+    shared
+        .offer_pacing
+        .lock()
+        .expect("offer pacing lock")
         .remove(peer_id);
     let entry = {
         let mut viewers = shared.viewers.lock().expect("viewer lock");
@@ -2346,10 +2431,15 @@ fn restore_source_head(
 
 /// Builds the replaceable capture-side element chain for one source and
 /// returns it with the capture grant that backs it, if any. The elements are
-/// not yet part of a pipeline.
+/// not yet part of a pipeline. `frame_rate` is the profile's target, which a
+/// screen source that paces itself (Windows) is asked to produce.
 fn build_source_head(
     source: SourceConfig,
+    frame_rate: i32,
 ) -> Result<(Vec<gst::Element>, Option<CaptureStream>), BroadcastError> {
+    // The compositor paces PipeWire captures; only Windows capture needs it.
+    #[cfg(not(windows))]
+    let _ = frame_rate;
     let start_error = |error: gst::glib::BoolError| BroadcastError::Start(error.to_string());
     match source {
         SourceConfig::Synthetic(synthetic) => {
@@ -2396,6 +2486,7 @@ fn build_source_head(
                 .map_err(start_error)?;
             Ok((vec![source, capsfilter], None))
         }
+        #[cfg(not(windows))]
         SourceConfig::Screen(stream) => {
             use std::os::fd::AsRawFd;
             let source = gst::ElementFactory::make("pipewiresrc")
@@ -2416,6 +2507,40 @@ fn build_source_head(
             // stack this software path does not carry.
             let capsfilter = gst::ElementFactory::make("capsfilter")
                 .property("caps", gst::Caps::new_empty_simple("video/x-raw"))
+                .build()
+                .map_err(start_error)?;
+            Ok((vec![source, capsfilter], Some(stream)))
+        }
+        #[cfg(windows)]
+        SourceConfig::Screen(stream) => {
+            use crate::capture::CaptureTarget;
+            // Windows Graphics Capture for displays and windows alike: it
+            // works whichever GPU drives the display and draws the cursor.
+            let source = gst::ElementFactory::make(SCREEN_SOURCE)
+                .property_from_str("capture-api", "wgc")
+                .property("show-cursor", stream.show_cursor);
+            let source = match stream.target {
+                CaptureTarget::Display(monitor) => source.property("monitor-handle", monitor),
+                // The client area is the window's content; the frame and
+                // title bar are system chrome the viewers do not need.
+                CaptureTarget::Window(window) => source
+                    .property("window-handle", window)
+                    .property_from_str("window-capture-mode", "client"),
+            };
+            let source = source.build().map_err(start_error)?;
+            // Unlike a compositor, the element paces itself: it emits frames
+            // at its negotiated rate, repeating the last one while the screen
+            // is still, and would otherwise settle on its 30 fps default. Ask
+            // for the profile's rate so Motion captures at 60. System-memory
+            // frames only, as on Linux: the encoder branches consume raw
+            // video directly.
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .property(
+                    "caps",
+                    gst::Caps::builder("video/x-raw")
+                        .field("framerate", gst::Fraction::new(frame_rate, 1))
+                        .build(),
+                )
                 .build()
                 .map_err(start_error)?;
             Ok((vec![source, capsfilter], Some(stream)))
@@ -3004,12 +3129,7 @@ fn build_audio_head(
     match audio {
         AudioCapture::Disabled => unreachable!("handled by the caller"),
         AudioCapture::SystemMix if mode == AudioHeadMode::Capture => {
-            // "@DEFAULT_MONITOR@" resolves server-side to the monitor of the
-            // current default output, following device switches.
-            let source = gst::ElementFactory::make("pulsesrc")
-                .property("device", "@DEFAULT_MONITOR@")
-                .build()
-                .map_err(|error| error.to_string())?;
+            let source = system_audio_source()?;
             pipeline.add(&source).map_err(|error| error.to_string())?;
             Ok(BuiltAudioHead::plain(vec![source]))
         }
@@ -3079,8 +3199,9 @@ fn build_stream_mix(
     })
 }
 
-/// One application leg, linked into the mixer and playing: pipewiresrc for
-/// the target, normalized to the mix format.
+/// One application leg, linked into the mixer and playing: the target's
+/// capture source (pipewiresrc on Linux, process-loopback wasapi2src on
+/// Windows), normalized to the mix format.
 fn build_stream_leg(
     pipeline: &gst::Pipeline,
     mixer: &gst::Element,
@@ -3117,12 +3238,52 @@ fn build_stream_leg(
     Ok(leg)
 }
 
+/// Everything the presenter hears.
+#[cfg(not(windows))]
+fn system_audio_source() -> Result<gst::Element, String> {
+    // "@DEFAULT_MONITOR@" resolves server-side to the monitor of the
+    // current default output, following device switches.
+    gst::ElementFactory::make("pulsesrc")
+        .property("device", "@DEFAULT_MONITOR@")
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// Everything the presenter hears: WASAPI loopback of the default output.
+/// With no device named, the element follows default-device switches.
+#[cfg(windows)]
+fn system_audio_source() -> Result<gst::Element, String> {
+    gst::ElementFactory::make("wasapi2src")
+        .property("loopback", true)
+        .property("low-latency", true)
+        .build()
+        .map_err(|_| "the audio component `wasapi2src` is unavailable".to_owned())
+}
+
+#[cfg(not(windows))]
 fn application_source(target_object: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make("pipewiresrc")
         .property("target-object", target_object)
         .property("do-timestamp", true)
         .build()
         .map_err(|_| "the audio component `pipewiresrc` is unavailable".to_owned())
+}
+
+/// On Windows a target is a process id, captured with process loopback. The
+/// capture takes the process's whole tree (its children too), which is why
+/// the caller's exclusion policy checks trees before naming a target.
+#[cfg(windows)]
+fn application_source(target_object: &str) -> Result<gst::Element, String> {
+    let process: u32 = target_object
+        .parse()
+        .map_err(|_| format!("`{target_object}` is not a process id"))?;
+    gst::ElementFactory::make("wasapi2src")
+        .property("loopback", true)
+        .property_from_str("loopback-mode", "include-process-tree")
+        .property("loopback-target-pid", process)
+        .property("low-latency", true)
+        .build()
+        .map_err(|_| "the audio component `wasapi2src` is unavailable".to_owned())
 }
 
 /// The default capture ceiling, matching the web client's default.
